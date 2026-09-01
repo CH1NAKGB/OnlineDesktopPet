@@ -4,7 +4,10 @@ mod chat;
 mod config;
 mod frame_pacer;
 mod lan_discovery;
+#[cfg(not(target_os = "windows"))]
 mod renderer;
+#[cfg(target_os = "windows")]
+mod windows_renderer;
 
 use std::{
     sync::{Arc, mpsc},
@@ -13,8 +16,11 @@ use std::{
 
 use config::ClientConfig;
 use frame_pacer::FramePacer;
+#[cfg(not(target_os = "windows"))]
 use renderer::Renderer;
 use shared_protocol::{MessageBody, PetSkin, SharedPetAction};
+#[cfg(target_os = "windows")]
+use windows_renderer::Renderer;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -37,8 +43,7 @@ use tray_icon::{
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongW, LWA_COLORKEY, SetLayeredWindowAttributes, SetWindowLongW,
-    WS_EX_LAYERED,
+    GWL_EXSTYLE, GetWindowLongW, SetWindowLongW, WS_EX_LAYERED,
 };
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -55,6 +60,8 @@ enum NetworkEvent {
         sender_id: String,
         body: MessageBody,
     },
+    PairingCodeRegistered(String),
+    Paired(String),
     Disconnected,
 }
 
@@ -68,6 +75,7 @@ enum NetworkCommand {
         recipient_id: String,
         body: MessageBody,
     },
+    PairWithCode(String),
 }
 
 #[cfg(target_os = "macos")]
@@ -98,7 +106,7 @@ impl PetMenu {
         let sunshine = MenuItem::new("日光小鸡", true, None);
         let blueberry = MenuItem::new("蓝莓小鸡", true, None);
         let cocoa = MenuItem::new("可可小鸡", true, None);
-        let chat = MenuItem::new("聊天", partner_id.is_some(), None);
+        let chat = MenuItem::new("配对 / 聊天", true, None);
         let quality = MenuItem::new("网络：正在连接", false, None);
         let quit = MenuItem::new("退出 Chick Link", true, None);
 
@@ -188,9 +196,9 @@ struct WindowsTray {
 
 #[cfg(target_os = "windows")]
 impl WindowsTray {
-    fn new(partner_id: Option<&str>) -> Self {
+    fn new(_partner_id: Option<&str>) -> Self {
         let menu = TrayMenu::new();
-        let chat = TrayMenuItem::new("聊天", partner_id.is_some(), None);
+        let chat = TrayMenuItem::new("配对 / 聊天", true, None);
         let show_pet = TrayMenuItem::new("显示小鸡", true, None);
         let quit = TrayMenuItem::new("退出 Chick Link", true, None);
         menu.append(&chat).expect("append tray chat");
@@ -260,7 +268,7 @@ impl WindowsPetMenu {
         let sunshine = TrayMenuItem::new("日光小鸡", true, None);
         let blueberry = TrayMenuItem::new("蓝莓小鸡", true, None);
         let cocoa = TrayMenuItem::new("可可小鸡", true, None);
-        let chat = TrayMenuItem::new("聊天", partner_id.is_some(), None);
+        let chat = TrayMenuItem::new("配对 / 聊天", true, None);
         let quit = TrayMenuItem::new("退出 Chick Link", true, None);
         skins.append(&sunshine).expect("append sunshine skin");
         skins.append(&blueberry).expect("append blueberry skin");
@@ -338,7 +346,6 @@ fn enable_windows_transparency(window: &Window) {
     unsafe {
         let style = GetWindowLongW(hwnd as _, GWL_EXSTYLE);
         SetWindowLongW(hwnd as _, GWL_EXSTYLE, style | WS_EX_LAYERED as i32);
-        SetLayeredWindowAttributes(hwnd as _, 0, 255, LWA_COLORKEY);
     }
 }
 
@@ -370,6 +377,8 @@ struct PetApp {
     network_events: mpsc::Receiver<NetworkEvent>,
     network_commands: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
     partner_id: Option<String>,
+    pairing_code: String,
+    bubble: Option<(String, Instant)>,
     latency_ms: Option<u32>,
     #[cfg(target_os = "macos")]
     menu: Option<PetMenu>,
@@ -386,6 +395,7 @@ impl PetApp {
         network_events: mpsc::Receiver<NetworkEvent>,
         network_commands: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
         partner_id: Option<String>,
+        pairing_code: String,
     ) -> Self {
         Self {
             window: None,
@@ -398,6 +408,8 @@ impl PetApp {
             network_events,
             network_commands,
             partner_id,
+            pairing_code,
+            bubble: None,
             latency_ms: None,
             #[cfg(target_os = "macos")]
             menu: None,
@@ -442,15 +454,21 @@ impl PetApp {
     }
 
     fn open_chat(&self) {
-        let Some(text) = chat::compose(self.partner_id.as_deref()) else {
-            return;
-        };
-        let Some(recipient_id) = self.partner_id.clone() else {
-            return;
-        };
-        let _ = self.network_commands.send(NetworkCommand::DirectMessage {
-            recipient_id,
-            body: MessageBody::Text { text },
+        let sender = self.network_commands.clone();
+        let partner_id = self.partner_id.clone();
+        let pairing_code = self.pairing_code.clone();
+        // Native dialogs are modal. Run them away from Winit so animation and menus stay responsive.
+        std::thread::spawn(move || {
+            if let Some(recipient_id) = partner_id {
+                if let Some(text) = chat::compose(Some(&recipient_id)) {
+                    let _ = sender.send(NetworkCommand::DirectMessage {
+                        recipient_id,
+                        body: MessageBody::Text { text },
+                    });
+                }
+            } else if let Some(code) = chat::prompt_pairing_code(&pairing_code) {
+                let _ = sender.send(NetworkCommand::PairWithCode(code));
+            }
         });
     }
 
@@ -630,9 +648,14 @@ impl ApplicationHandler for PetApp {
                 NetworkEvent::SharedPetAction(action) => self.apply_shared_action(action, false),
                 NetworkEvent::DirectMessage { sender_id, body } => {
                     if let MessageBody::Text { text } = body {
-                        chat::show_incoming(&sender_id, &text);
+                        self.bubble = Some((
+                            format!("{sender_id}: {text}"),
+                            Instant::now() + Duration::from_secs(8),
+                        ));
                     }
                 }
+                NetworkEvent::PairingCodeRegistered(code) => self.pairing_code = code,
+                NetworkEvent::Paired(partner_id) => self.partner_id = Some(partner_id),
                 NetworkEvent::Connecting | NetworkEvent::Connected => {}
             }
             #[cfg(target_os = "macos")]
@@ -667,10 +690,16 @@ fn main() -> anyhow::Result<()> {
     let config = ClientConfig::default();
     let (events_tx, events_rx) = mpsc::channel();
     let partner_id = config.partner_id.clone();
+    let pairing_code = config.pairing_code.clone();
     let (commands_tx, commands_rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || network::run(config, events_tx, commands_rx));
     let event_loop = EventLoop::new()?;
-    event_loop.run_app(&mut PetApp::new(events_rx, commands_tx, partner_id))?;
+    event_loop.run_app(&mut PetApp::new(
+        events_rx,
+        commands_tx,
+        partner_id,
+        pairing_code,
+    ))?;
     Ok(())
 }
 
@@ -705,11 +734,14 @@ mod network {
                 access_token: config.access_token,
                 device_id: config.device_id,
             };
+            let register_code = ClientEvent::RegisterPairingCode {
+                code: config.pairing_code,
+            };
             let presence = ClientEvent::Presence {
                 state: PresenceState::Online,
                 activity: None,
             };
-            for event in [hello, presence] {
+            for event in [hello, register_code, presence] {
                 let Ok(json) = serde_json::to_string(&event) else {
                     continue;
                 };
@@ -741,6 +773,7 @@ mod network {
                             super::NetworkCommand::DirectMessage { recipient_id, body } => {
                                 ClientEvent::DirectMessage { recipient_id, body }
                             }
+                            super::NetworkCommand::PairWithCode(code) => ClientEvent::PairWithCode { code },
                         };
                         let Ok(json) = serde_json::to_string(&event) else {
                             continue;
@@ -770,6 +803,12 @@ mod network {
                             }
                             ServerEvent::DirectMessage { sender_id, body } => {
                                 let _ = events.send(super::NetworkEvent::DirectMessage { sender_id, body });
+                            }
+                            ServerEvent::PairingCodeRegistered { code } => {
+                                let _ = events.send(super::NetworkEvent::PairingCodeRegistered(code));
+                            }
+                            ServerEvent::Paired { partner_id } => {
+                                let _ = events.send(super::NetworkEvent::Paired(partner_id));
                             }
                             _ => {}
                         }

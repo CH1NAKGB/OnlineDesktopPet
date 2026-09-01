@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_TEXT_CHARS: usize = 2_000;
+pub const PAIRING_CODE_LEN: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -12,6 +13,12 @@ pub enum ClientEvent {
         protocol_version: u16,
         access_token: String,
         device_id: String,
+    },
+    RegisterPairingCode {
+        code: String,
+    },
+    PairWithCode {
+        code: String,
     },
     Presence {
         state: PresenceState,
@@ -36,6 +43,12 @@ pub enum ServerEvent {
     Ready {
         user_id: String,
     },
+    PairingCodeRegistered {
+        code: String,
+    },
+    Paired {
+        partner_id: String,
+    },
     Presence {
         user_id: String,
         state: PresenceState,
@@ -54,6 +67,13 @@ pub enum ServerEvent {
         message: String,
     },
     Pong,
+}
+
+pub fn is_valid_pairing_code(code: &str) -> bool {
+    code.len() == PAIRING_CODE_LEN
+        && code.bytes().all(|byte| {
+            matches!(byte, b'2'..=b'9' | b'A'..=b'Z') && !matches!(byte, b'I' | b'L' | b'O')
+        })
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -167,5 +187,12 @@ mod tests {
             }
             .is_valid()
         );
+    }
+
+    #[test]
+    fn validates_unambiguous_pairing_codes() {
+        assert!(is_valid_pairing_code("7KQ3M9XZ"));
+        assert!(!is_valid_pairing_code("7KQ3MI9Z"));
+        assert!(!is_valid_pairing_code("short"));
     }
 }

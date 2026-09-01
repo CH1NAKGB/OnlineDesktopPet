@@ -10,7 +10,7 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
-use shared_protocol::{ClientEvent, PROTOCOL_VERSION, ServerEvent};
+use shared_protocol::{ClientEvent, PROTOCOL_VERSION, ServerEvent, is_valid_pairing_code};
 use tokio::sync::{RwLock, mpsc};
 use tracing::{info, warn};
 
@@ -22,6 +22,8 @@ type Sessions = Arc<RwLock<HashMap<String, Tx>>>;
 #[derive(Clone)]
 struct AppState {
     sessions: Sessions,
+    pairing_codes: Arc<RwLock<HashMap<String, String>>>,
+    partners: Arc<RwLock<HashMap<String, String>>>,
 }
 
 #[tokio::main]
@@ -29,6 +31,8 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let state = AppState {
         sessions: Arc::default(),
+        pairing_codes: Arc::default(),
+        partners: Arc::default(),
     };
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -129,6 +133,64 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 });
                 user_id = Some(id);
             }
+            ClientEvent::RegisterPairingCode { code } => {
+                let Some(id) = &user_id else { continue };
+                if !is_valid_pairing_code(&code) {
+                    send_error(
+                        &outbound,
+                        "invalid_pairing_code",
+                        "Pairing code format is invalid",
+                    );
+                    continue;
+                }
+                let mut codes = state.pairing_codes.write().await;
+                match codes.get(&code) {
+                    Some(owner) if owner != id => {
+                        send_error(
+                            &outbound,
+                            "pairing_code_conflict",
+                            "Pairing code is already in use",
+                        );
+                    }
+                    _ => {
+                        codes.retain(|_, owner| owner != id);
+                        codes.insert(code.clone(), id.clone());
+                        let _ = outbound.send(ServerEvent::PairingCodeRegistered { code });
+                    }
+                }
+            }
+            ClientEvent::PairWithCode { code } => {
+                let Some(id) = &user_id else { continue };
+                let partner = state.pairing_codes.read().await.get(&code).cloned();
+                let Some(partner_id) = partner.filter(|partner| partner != id) else {
+                    send_error(
+                        &outbound,
+                        "pairing_code_not_found",
+                        "Pairing code was not found",
+                    );
+                    continue;
+                };
+                let mut partners = state.partners.write().await;
+                if partners.contains_key(id) || partners.contains_key(&partner_id) {
+                    send_error(
+                        &outbound,
+                        "already_paired",
+                        "One of these accounts is already paired",
+                    );
+                    continue;
+                }
+                partners.insert(id.clone(), partner_id.clone());
+                partners.insert(partner_id.clone(), id.clone());
+                drop(partners);
+                let _ = outbound.send(ServerEvent::Paired {
+                    partner_id: partner_id.clone(),
+                });
+                if let Some(peer) = state.sessions.read().await.get(&partner_id) {
+                    let _ = peer.send(ServerEvent::Paired {
+                        partner_id: id.clone(),
+                    });
+                }
+            }
             ClientEvent::DirectMessage { recipient_id, body } => {
                 if user_id.is_none() {
                     continue;
@@ -138,6 +200,20 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                         code: "invalid_message".into(),
                         message: "Message body exceeds the allowed limits".into(),
                     });
+                    continue;
+                }
+                if !is_partner(
+                    &state,
+                    user_id.as_deref().unwrap_or_default(),
+                    &recipient_id,
+                )
+                .await
+                {
+                    send_error(
+                        &outbound,
+                        "not_paired",
+                        "Messages can only be sent to your paired partner",
+                    );
                     continue;
                 }
                 if let Some(peer) = state.sessions.read().await.get(&recipient_id) {
@@ -152,6 +228,14 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 action,
             } => {
                 if let Some(sender_id) = &user_id {
+                    if !is_partner(&state, sender_id, &recipient_id).await {
+                        send_error(
+                            &outbound,
+                            "not_paired",
+                            "Pet actions can only be sent to your paired partner",
+                        );
+                        continue;
+                    }
                     if let Some(peer) = state.sessions.read().await.get(&recipient_id) {
                         let _ = peer.send(ServerEvent::SharedPetAction {
                             sender_id: sender_id.clone(),
@@ -164,14 +248,14 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 state: presence,
                 activity,
             } => {
-                // Presence fan-out will become contact-list scoped once the auth/database service is added.
                 if let Some(id) = &user_id {
-                    for (peer_id, peer) in state.sessions.read().await.iter() {
-                        if peer_id != id {
+                    let partner_id = state.partners.read().await.get(id).cloned();
+                    if let Some(partner_id) = partner_id {
+                        if let Some(peer) = state.sessions.read().await.get(&partner_id) {
                             let _ = peer.send(ServerEvent::Presence {
                                 user_id: id.clone(),
                                 state: presence,
-                                activity: activity.clone(),
+                                activity,
                             });
                         }
                     }
@@ -188,4 +272,20 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
         warn!(user_id = %id, "client disconnected");
     }
     writer.abort();
+}
+
+fn send_error(outbound: &Tx, code: &str, message: &str) {
+    let _ = outbound.send(ServerEvent::Error {
+        code: code.into(),
+        message: message.into(),
+    });
+}
+
+async fn is_partner(state: &AppState, user_id: &str, recipient_id: &str) -> bool {
+    state
+        .partners
+        .read()
+        .await
+        .get(user_id)
+        .is_some_and(|partner| partner == recipient_id)
 }

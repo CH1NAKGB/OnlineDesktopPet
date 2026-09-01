@@ -19,10 +19,9 @@ pub fn compose(partner_id: Option<&str>) -> Option<String> {
     Some(text.chars().take(MAX_TEXT_CHARS).collect())
 }
 
-pub fn show_incoming(sender_id: &str, text: &str) {
-    tinyfiledialogs::message_box_ok(
-        &format!("来自 {sender_id} 的消息"),
-        text,
-        MessageBoxIcon::Info,
-    );
+pub fn prompt_pairing_code(own_code: &str) -> Option<String> {
+    let prompt = format!("你的配对码：{own_code}\n输入对方的 8 位配对码：");
+    let code = tinyfiledialogs::input_box("Chick Link 配对", &prompt, "")?;
+    let code = code.trim().to_ascii_uppercase();
+    shared_protocol::is_valid_pairing_code(&code).then_some(code)
 }

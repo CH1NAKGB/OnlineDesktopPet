@@ -2440,6 +2440,7 @@ dependencies = [
  "mdns-sd",
  "muda",
  "pollster",
+ "rand",
  "serde",
  "serde_json",
  "shared-protocol",
