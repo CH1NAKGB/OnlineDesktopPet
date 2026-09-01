@@ -34,7 +34,7 @@ cargo run -p pet-client
 
 ## 共同宠物与交互
 
-一只小鸡由两位主人共同操作。macOS 端右键小鸡会显示原生交互菜单，提供轻拍、日光/蓝莓/可可三种换肤、聊天、网络质量与 RTT、退出等操作。Windows 桌宠不会显示在任务栏，聊天、显示桌宠和退出入口位于系统托盘。
+一只小鸡由两位主人共同操作。macOS 与 Windows 都可以右键小鸡显示原生交互菜单，提供轻拍、日光/蓝莓/可可三种换肤、聊天和退出等操作；macOS 菜单还显示网络质量与 RTT。Windows 桌宠不会显示在任务栏，聊天、显示桌宠和退出入口也可从系统托盘访问。Windows 使用分层窗口透明键控作为部分 DX/Vulkan 显卡显示黑底时的兼容兜底。
 
 客户端每三秒向中继发送一次 `Ping`，依据收到 `Pong` 的实际往返时间显示网络等级。将另一位开发者身份填入环境变量 `CHICK_PARTNER_ID` 后，轻拍和换肤会作为 `SharedPetAction` 发送给对方，双方会更新同一只小鸡的状态：
 
@@ -84,3 +84,7 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
 > 安全提醒：当前 `dev:<name>` 是仅供本地调试的临时身份，不可暴露到公网。生产前需要认证站、JWT 签名校验、好友关系校验、上传 MIME/尺寸限制、速率限制和审计日志。
 
 阿里云 CentOS 7.9 与 x64 NAS 的具体部署边界见 [deploy/centos7.md](deploy/centos7.md)。
+
+## macOS DMG
+
+`ChickLink-macos-universal.dmg` 同时包含 Apple Silicon 与 Intel 架构。当前测试包使用临时签名而非 Apple Developer ID 签名；首次打开时如被 Gatekeeper 拦截，可在“系统设置 → 隐私与安全性”中选择仍要打开。正式发布前需要 Developer ID 签名和公证。

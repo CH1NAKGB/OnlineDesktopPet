@@ -30,11 +30,17 @@ use muda::{ContextMenu, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, S
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
     menu::{
-        Menu as TrayMenu, MenuEvent as TrayMenuEvent, MenuId as TrayMenuId,
-        MenuItem as TrayMenuItem,
+        ContextMenu as TrayContextMenu, Menu as TrayMenu, MenuEvent as TrayMenuEvent,
+        MenuId as TrayMenuId, MenuItem as TrayMenuItem,
+        PredefinedMenuItem as TrayPredefinedMenuItem, Submenu as TraySubmenu,
     },
 };
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GWL_EXSTYLE, GetWindowLongW, LWA_COLORKEY, SetLayeredWindowAttributes, SetWindowLongW,
+    WS_EX_LAYERED,
+};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 const PET_SIZE: f64 = 144.0;
@@ -220,9 +226,120 @@ impl WindowsTray {
 
 #[cfg(target_os = "windows")]
 enum TrayAction {
+    Pet,
+    Skin(PetSkin),
     Chat,
     ShowPet,
     Quit,
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsPetMenu {
+    menu: TrayMenu,
+    pet: TrayMenuItem,
+    sunshine: TrayMenuItem,
+    blueberry: TrayMenuItem,
+    cocoa: TrayMenuItem,
+    chat: TrayMenuItem,
+    quit: TrayMenuItem,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsPetMenu {
+    fn new(window: &Window, partner_id: Option<&str>) -> Self {
+        let menu = TrayMenu::new();
+        let owners = TrayMenuItem::new(
+            partner_id
+                .map(|id| format!("共同小鸡 · 已配对给 {id}"))
+                .unwrap_or_else(|| "共同小鸡 · 尚未配对".into()),
+            false,
+            None,
+        );
+        let pet = TrayMenuItem::new("轻拍一下", true, None);
+        let skins = TraySubmenu::new("换肤", true);
+        let sunshine = TrayMenuItem::new("日光小鸡", true, None);
+        let blueberry = TrayMenuItem::new("蓝莓小鸡", true, None);
+        let cocoa = TrayMenuItem::new("可可小鸡", true, None);
+        let chat = TrayMenuItem::new("聊天", partner_id.is_some(), None);
+        let quit = TrayMenuItem::new("退出 Chick Link", true, None);
+        skins.append(&sunshine).expect("append sunshine skin");
+        skins.append(&blueberry).expect("append blueberry skin");
+        skins.append(&cocoa).expect("append cocoa skin");
+        menu.append(&owners).expect("append owners label");
+        menu.append(&TrayPredefinedMenuItem::separator())
+            .expect("append separator");
+        menu.append(&pet).expect("append pet action");
+        menu.append(&skins).expect("append skins menu");
+        menu.append(&chat).expect("append chat action");
+        menu.append(&TrayPredefinedMenuItem::separator())
+            .expect("append separator");
+        menu.append(&quit).expect("append quit action");
+        if let Some(hwnd) = windows_hwnd(window) {
+            unsafe { menu.attach_menu_subclass_for_hwnd(hwnd) };
+        }
+        Self {
+            menu,
+            pet,
+            sunshine,
+            blueberry,
+            cocoa,
+            chat,
+            quit,
+        }
+    }
+
+    fn show(&self, window: &Window, position: winit::dpi::PhysicalPosition<f64>) {
+        let Some(hwnd) = windows_hwnd(window) else {
+            return;
+        };
+        let position = tray_icon::dpi::PhysicalPosition {
+            x: position.x,
+            y: position.y,
+        };
+        unsafe {
+            self.menu
+                .show_context_menu_for_hwnd(hwnd, Some(position.into()));
+        }
+    }
+
+    fn action_for(&self, id: &TrayMenuId) -> Option<TrayAction> {
+        if id == self.pet.id() {
+            Some(TrayAction::Pet)
+        } else if id == self.sunshine.id() {
+            Some(TrayAction::Skin(PetSkin::Sunshine))
+        } else if id == self.blueberry.id() {
+            Some(TrayAction::Skin(PetSkin::Blueberry))
+        } else if id == self.cocoa.id() {
+            Some(TrayAction::Skin(PetSkin::Cocoa))
+        } else if id == self.chat.id() {
+            Some(TrayAction::Chat)
+        } else if id == self.quit.id() {
+            Some(TrayAction::Quit)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_hwnd(window: &Window) -> Option<isize> {
+    let handle = window.window_handle().ok()?;
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+    Some(handle.hwnd.get())
+}
+
+#[cfg(target_os = "windows")]
+fn enable_windows_transparency(window: &Window) {
+    let Some(hwnd) = windows_hwnd(window) else {
+        return;
+    };
+    unsafe {
+        let style = GetWindowLongW(hwnd as _, GWL_EXSTYLE);
+        SetWindowLongW(hwnd as _, GWL_EXSTYLE, style | WS_EX_LAYERED as i32);
+        SetLayeredWindowAttributes(hwnd as _, 0, 255, LWA_COLORKEY);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -258,7 +375,9 @@ struct PetApp {
     menu: Option<PetMenu>,
     #[cfg(target_os = "windows")]
     tray: Option<WindowsTray>,
-    #[cfg(target_os = "macos")]
+    #[cfg(target_os = "windows")]
+    windows_menu: Option<WindowsPetMenu>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     cursor_position: winit::dpi::PhysicalPosition<f64>,
 }
 
@@ -284,7 +403,9 @@ impl PetApp {
             menu: None,
             #[cfg(target_os = "windows")]
             tray: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(target_os = "windows")]
+            windows_menu: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             cursor_position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
         }
     }
@@ -358,8 +479,17 @@ impl PetApp {
             let action = self
                 .tray
                 .as_ref()
-                .and_then(|tray| tray.action_for(&event.id));
+                .and_then(|tray| tray.action_for(&event.id))
+                .or_else(|| {
+                    self.windows_menu
+                        .as_ref()
+                        .and_then(|menu| menu.action_for(&event.id))
+                });
             match action {
+                Some(TrayAction::Pet) => self.apply_shared_action(SharedPetAction::Pet, true),
+                Some(TrayAction::Skin(skin)) => {
+                    self.apply_shared_action(SharedPetAction::SetSkin { skin }, true)
+                }
                 Some(TrayAction::Chat) => self.open_chat(),
                 Some(TrayAction::ShowPet) => {
                     if let Some(window) = self.window.as_ref() {
@@ -396,9 +526,11 @@ impl ApplicationHandler for PetApp {
                 .create_window(attributes)
                 .expect("create desktop pet window"),
         );
+        #[cfg(target_os = "windows")]
+        enable_windows_transparency(&window);
         self.renderer =
             Some(pollster::block_on(Renderer::new(window.clone())).expect("create GPU renderer"));
-        self.window = Some(window);
+        self.window = Some(window.clone());
         #[cfg(target_os = "macos")]
         {
             self.menu = Some(PetMenu::new(self.partner_id.as_deref()));
@@ -406,6 +538,7 @@ impl ApplicationHandler for PetApp {
         #[cfg(target_os = "windows")]
         {
             self.tray = Some(WindowsTray::new(self.partner_id.as_deref()));
+            self.windows_menu = Some(WindowsPetMenu::new(&window, self.partner_id.as_deref()));
         }
     }
 
@@ -448,16 +581,19 @@ impl ApplicationHandler for PetApp {
                     self.apply_shared_action(SharedPetAction::Pet, true);
                 }
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             WindowEvent::CursorMoved { position, .. } => self.cursor_position = position,
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
-            } =>
-            {
+            } => {
                 #[cfg(target_os = "macos")]
                 if let Some(menu) = self.menu.as_ref() {
+                    menu.show(&window, self.cursor_position);
+                }
+                #[cfg(target_os = "windows")]
+                if let Some(menu) = self.windows_menu.as_ref() {
                     menu.show(&window, self.cursor_position);
                 }
             }
