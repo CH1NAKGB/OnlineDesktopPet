@@ -791,6 +791,9 @@ impl ApplicationHandler for PetApp {
             self.bubble = None;
             window.request_redraw();
         }
+        if let Some(chat_window) = self.chat_window.as_ref() {
+            chat_window.request_resize_redraw_if_due();
+        }
         #[cfg(target_os = "macos")]
         self.handle_menu_events(event_loop);
         #[cfg(target_os = "windows")]

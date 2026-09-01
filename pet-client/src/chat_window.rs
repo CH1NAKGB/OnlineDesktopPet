@@ -1,4 +1,8 @@
-use std::{fs, sync::Arc};
+use std::{
+    fs,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use egui::{Color32, RichText};
@@ -38,6 +42,8 @@ pub struct ChatWindow {
     editing_name: bool,
     status: String,
     dark_mode: bool,
+    pending_size: Option<winit::dpi::PhysicalSize<u32>>,
+    resize_deadline: Option<Instant>,
 }
 
 impl ChatWindow {
@@ -127,6 +133,8 @@ impl ChatWindow {
             editing_name: false,
             status: "等待输入对方配对码".into(),
             dark_mode,
+            pending_size: None,
+            resize_deadline: None,
         })
     }
 
@@ -188,19 +196,46 @@ impl ChatWindow {
         match event {
             WindowEvent::CloseRequested => self.window.set_visible(false),
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
-                self.config.width = size.width;
-                self.config.height = size.height;
-                self.surface.configure(&self.device, &self.config);
+                self.pending_size = Some(*size);
+                self.resize_deadline = Some(Instant::now() + Duration::from_millis(40));
             }
             WindowEvent::ThemeChanged(theme) => {
                 self.dark_mode = matches!(theme, Theme::Dark);
                 configure_style(&self.context, self.dark_mode);
                 self.window.request_redraw();
             }
-            WindowEvent::RedrawRequested => return self.render(),
+            WindowEvent::RedrawRequested => {
+                if self
+                    .resize_deadline
+                    .is_some_and(|deadline| Instant::now() < deadline)
+                {
+                    return Ok(Vec::new());
+                }
+                self.apply_pending_resize();
+                return self.render();
+            }
             _ => {}
         }
         Ok(Vec::new())
+    }
+
+    pub fn request_resize_redraw_if_due(&self) {
+        if self
+            .resize_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.window.request_redraw();
+        }
+    }
+
+    fn apply_pending_resize(&mut self) {
+        let Some(size) = self.pending_size.take() else {
+            return;
+        };
+        self.resize_deadline = None;
+        self.config.width = size.width.max(1);
+        self.config.height = size.height.max(1);
+        self.surface.configure(&self.device, &self.config);
     }
 
     fn render(&mut self) -> anyhow::Result<Vec<ChatAction>> {

@@ -15,6 +15,11 @@ use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::windows_hwnd;
 
+// Some Windows/remote-display combinations report the desktop work area as the
+// initial client size, which would create a giant transparent hit target.
+const PET_LOGICAL_WIDTH: f64 = 144.0;
+const PET_LOGICAL_HEIGHT: f64 = 220.0;
+
 pub struct Renderer {
     hwnd: isize,
     dc: HDC,
@@ -29,9 +34,9 @@ pub struct Renderer {
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let hwnd = windows_hwnd(&window).context("missing Windows window handle")?;
-        let size = window.inner_size();
-        let width = size.width.max(1);
-        let height = size.height.max(1);
+        let scale_factor = window.scale_factor();
+        let width = (PET_LOGICAL_WIDTH * scale_factor).round().max(1.0) as u32;
+        let height = (PET_LOGICAL_HEIGHT * scale_factor).round().max(1.0) as u32;
         let dc = unsafe { CreateCompatibleDC(ptr::null_mut()) };
         ensure!(!dc.is_null(), "CreateCompatibleDC failed");
         let info = BITMAPINFO {
