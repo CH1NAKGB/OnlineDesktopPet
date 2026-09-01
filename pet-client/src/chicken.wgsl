@@ -11,7 +11,10 @@ struct VertexOutput { @builtin(position) position: vec4<f32>, @location(0) uv: v
 fn ellipse(point: vec2<f32>, center: vec2<f32>, radius: vec2<f32>) -> f32 { return 1.0 - smoothstep(0.94, 1.0, length((point - center) / radius)); }
 fn layer(base: vec4<f32>, color: vec4<f32>, mask: f32) -> vec4<f32> { return mix(base, color, mask * color.a); }
 @fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let point = input.uv + vec2<f32>(0.0, sin(animation.x * 4.0) * 0.012);
+    let petting = clamp(animation.y, 0.0, 1.0);
+    let idle_bob = sin(animation.x * 4.0) * 0.012;
+    let happy_bob = abs(sin(animation.x * 12.0)) * 0.035 * petting;
+    let point = input.uv + vec2<f32>(0.0, idle_bob + happy_bob);
     var color = vec4<f32>(0.0);
     color = layer(color, vec4<f32>(0.92, 0.58, 0.18, 1.0), ellipse(point, vec2<f32>(0.50, 0.60), vec2<f32>(0.31, 0.27)));
     color = layer(color, vec4<f32>(1.00, 0.83, 0.39, 1.0), ellipse(point, vec2<f32>(0.44, 0.45), vec2<f32>(0.25, 0.26)));

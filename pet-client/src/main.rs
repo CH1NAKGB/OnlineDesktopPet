@@ -7,7 +7,7 @@ mod renderer;
 
 use std::{
     sync::{Arc, mpsc},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use config::ClientConfig;
@@ -16,8 +16,9 @@ use renderer::Renderer;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, MouseButton, WindowEvent},
+    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{Key, NamedKey},
     window::{Window, WindowId, WindowLevel},
 };
 
@@ -27,6 +28,8 @@ struct PetApp {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     started_at: Instant,
+    press_started_at: Option<Instant>,
+    pet_until: Option<Instant>,
     pacer: FramePacer,
     _network_events: mpsc::Receiver<String>,
 }
@@ -37,6 +40,8 @@ impl PetApp {
             window: None,
             renderer: None,
             started_at: Instant::now(),
+            press_started_at: None,
+            pet_until: None,
             pacer: FramePacer::new(),
             _network_events: network_events,
         }
@@ -71,6 +76,15 @@ impl ApplicationHandler for PetApp {
         };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: Key::Named(NamedKey::Escape),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => event_loop.exit(),
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -78,8 +92,24 @@ impl ApplicationHandler for PetApp {
             } => {
                 // Let macOS/Windows own the drag so the window stays locked to the pointer.
                 let _ = window.drag_window();
+                self.press_started_at = Some(Instant::now());
                 self.pacer.activate();
                 window.request_redraw();
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if self
+                    .press_started_at
+                    .take()
+                    .is_some_and(|pressed_at| pressed_at.elapsed() < Duration::from_millis(180))
+                {
+                    self.pet_until = Some(Instant::now() + Duration::from_secs(2));
+                    self.pacer.activate();
+                    window.request_redraw();
+                }
             }
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
@@ -88,7 +118,11 @@ impl ApplicationHandler for PetApp {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(renderer) = self.renderer.as_ref() {
-                    if let Err(error) = renderer.render(self.started_at.elapsed().as_secs_f32()) {
+                    let petting =
+                        self.pet_until.is_some_and(|until| until > Instant::now()) as u32 as f32;
+                    if let Err(error) =
+                        renderer.render(self.started_at.elapsed().as_secs_f32(), petting)
+                    {
                         eprintln!("render error: {error}");
                     }
                 }

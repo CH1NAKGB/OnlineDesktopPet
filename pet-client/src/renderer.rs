@@ -145,11 +145,11 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    pub fn render(&self, seconds: f32) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&self, seconds: f32, petting: f32) -> Result<(), wgpu::SurfaceError> {
         self.queue.write_buffer(
             &self.time_buffer,
             0,
-            bytemuck::cast_slice(&[seconds, 0.0, 0.0, 0.0]),
+            bytemuck::cast_slice(&[seconds, petting, 0.0, 0.0]),
         );
         let output = self.surface.get_current_texture()?;
         let view = output

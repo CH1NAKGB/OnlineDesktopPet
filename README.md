@@ -30,6 +30,8 @@ cargo run -p pet-client
 
 桌宠目前以程序化原创小鸡绘制到真实透明窗口，主渲染链路不经过 WebView。下一步会把它替换为带 alpha 的精灵图，并增加逐像素点击穿透。
 
+左键拖动会使用系统原生窗口移动；快速轻点小鸡会触发短暂的开心跳动。按 `Esc` 可退出测试窗口。
+
 ## 局域网联机与搜索
 
 在一台 macOS、Windows 或 Linux 电脑上启动 `relay-server`，并设置 `LAN_DISCOVERY=true`。它会通过 mDNS 广播 `_chicklink._tcp.local.`；同一 Wi-Fi 或有线网段内的客户端会优先搜索这个中继，并连接 `ws://局域网地址:端口/ws`。搜索最多等待一秒，未发现时自动回退到配置的公网地址。
