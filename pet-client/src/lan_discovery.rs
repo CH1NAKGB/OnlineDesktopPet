@@ -16,7 +16,18 @@ pub fn find_relay(timeout: Duration) -> Option<String> {
             ServiceEvent::ServiceResolved(service) => {
                 let addresses = service.get_addresses_v4();
                 let ip = addresses.iter().next()?;
-                break Some(format!("ws://{}:{}/ws", ip, service.get_port()));
+                let scheme = service.get_property_val_str("scheme").unwrap_or("ws");
+                let host = service
+                    .get_property_val_str("host")
+                    .filter(|host| !host.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| ip.to_string());
+                let port = service
+                    .get_property_val_str("port")
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .unwrap_or_else(|| service.get_port());
+                let path = service.get_property_val_str("path").unwrap_or("/ws");
+                break Some(format!("{scheme}://{host}:{port}{path}"));
             }
             _ => continue,
         }

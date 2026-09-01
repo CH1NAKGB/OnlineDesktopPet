@@ -22,6 +22,8 @@ cargo run -p pet-client
 
 客户端默认连到 `ws://127.0.0.1:8080/ws`，开发身份是 `dev:chick-user`。两个不同客户端使用不同的 `dev:<name>` 值即可互发事件；发布前必须替换为认证站签发并校验的短期 JWT。
 
+如果改为 `wss://`，客户端默认信任系统证书。没有公网域名时，也可以通过 `CHICK_TLS_CA_CERT_PATH=/path/to/ca-or-cert.pem` 额外信任一份 PEM 证书或私有 CA 链。
+
 ## 帧率策略
 
 - 活跃状态（拖拽、抚摸、收到消息）：请求连续重绘，渲染器将使用与显示器同步的 present mode。
@@ -46,13 +48,25 @@ CHICK_ACCESS_TOKEN=dev:owner-a cargo run -p pet-client
 
 ## 局域网联机与搜索
 
-在一台 macOS、Windows 或 Linux 电脑上启动 `relay-server`，并设置 `LAN_DISCOVERY=true`。它会通过 mDNS 广播 `_chicklink._tcp.local.`；同一 Wi-Fi 或有线网段内的客户端会优先搜索这个中继，并连接 `ws://局域网地址:端口/ws`。搜索最多等待一秒，未发现时自动回退到配置的公网地址。
+在一台 macOS、Windows 或 Linux 电脑上启动 `relay-server`，并设置 `LAN_DISCOVERY=true`。它会通过 mDNS 广播 `_chicklink._tcp.local.`；同一 Wi-Fi 或有线网段内的客户端会优先搜索这个中继，并连接广播中声明的 `ws://` 或 `wss://` 地址。搜索最多等待一秒，未发现时自动回退到配置的公网地址。
 
 ```bash
 LAN_DISCOVERY=true cargo run -p relay-server
 ```
 
 局域网模式需要系统防火墙允许 UDP 5353（mDNS）与 TCP 8080（开发期中继端口）。企业/校园 Wi-Fi 若开启了“客户端隔离”，设备彼此不可见，这是网络策略限制，客户端会自动回退到公网连接。
+
+如果加密入口并不直接跑在中继进程上，而是由局域网内的反向代理终止 TLS，可额外设置：
+
+```bash
+LAN_DISCOVERY=true
+LAN_DISCOVERY_SCHEME=wss
+LAN_DISCOVERY_HOST=192.168.1.20
+LAN_DISCOVERY_PORT=443
+LAN_DISCOVERY_PATH=/ws
+```
+
+这样客户端发现的就是加密入口，而不是中继容器的明文端口。
 
 ### Windows 真机验证
 
@@ -80,6 +94,37 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
 ```
 
 域名必须先将 80/443 端口解析到主机，Caddy 才能自动申请 TLS 证书。NAS 采用 DDNS 时也可使用这套部署，但需要路由器端口转发和稳定的公网 IPv4/IPv6；没有稳定入站网络时，优先把中继放到阿里云。
+
+### 无域名、无 HTTPS 证书的加密通信
+
+支持。将服务端的 RSA 私钥与客户端的 RSA 公钥离线分发后，客户端可以直接使用 `ws://IP:8080/ws`：RSA-OAEP 只用于保护一次性 AES-256-GCM 会话密钥，后续业务事件都以带认证的 AES 密文传输。此模式不需要域名、HTTPS 证书、Caddy 或任何外部 CA。
+
+在运行中继的机器生成一对 3072 位密钥：
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out relay-private.pem
+openssl pkey -in relay-private.pem -pubout -out relay-public.pem
+```
+
+私钥仅保留在服务端，并启动中继：
+
+```bash
+RELAY_RSA_PRIVATE_KEY_PATH=/secure/path/relay-private.pem \
+LAN_DISCOVERY=true \
+cargo run -p relay-server
+```
+
+将 `relay-public.pem` 通过可信方式放到每台客户端，再启动客户端：
+
+```bash
+CHICK_RELAY_URL=ws://192.168.1.20:8080/ws \
+CHICK_SERVER_RSA_PUBLIC_KEY_PATH=/secure/path/relay-public.pem \
+cargo run -p pet-client
+```
+
+一旦服务端设置 `RELAY_RSA_PRIVATE_KEY_PATH`，它会拒绝任何未完成加密握手的客户端；客户端设置 `CHICK_SERVER_RSA_PUBLIC_KEY_PATH` 后，也只接受加密帧。公钥文件就是此模式的服务端身份凭据，不能通过同一条未加密网络连接下载，必须随安装包、U 盘、受信任内网共享或其他可信渠道分发。
+
+该方案保护业务内容和防篡改，但静态 RSA 密钥协商不具备 TLS 1.3 的前向保密能力；需要面向公网长期运行时，仍建议使用 `wss://`。`deploy/Caddyfile.no-domain` 和 `deploy/docker-compose.no-domain.yml` 继续可用于需要 TLS 的固定 IP 或纯内网场景。
 
 > 安全提醒：当前 `dev:<name>` 是仅供本地调试的临时身份，不可暴露到公网。生产前需要认证站、JWT 签名校验、好友关系校验、上传 MIME/尺寸限制、速率限制和审计日志。
 

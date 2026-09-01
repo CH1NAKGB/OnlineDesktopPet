@@ -799,11 +799,20 @@ fn main() -> anyhow::Result<()> {
 mod network {
     use super::ClientConfig;
     use futures_util::{SinkExt, StreamExt};
-    use shared_protocol::{ClientEvent, PROTOCOL_VERSION, PresenceState, ServerEvent};
+    use native_tls::Certificate;
+    use rsa::{RsaPublicKey, pkcs8::DecodePublicKey, traits::PublicKeyParts};
+    use shared_protocol::{
+        ClientEvent, ClientFrame, PROTOCOL_VERSION, PresenceState, SecureChannel, ServerEvent,
+        ServerFrame, encrypt_session_key,
+    };
+    use std::fs;
+    use std::path::Path;
     use std::sync::mpsc::Sender;
     use std::time::{Duration, Instant};
     use tokio::sync::mpsc::UnboundedReceiver;
     use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::{Connector, connect_async, connect_async_tls_with_config};
+    use url::Url;
 
     pub fn run(
         config: ClientConfig,
@@ -818,9 +827,22 @@ mod network {
                 config.relay_url
             };
             let _ = events.send(super::NetworkEvent::Connecting);
-            let Ok((mut socket, _)) = tokio_tungstenite::connect_async(&relay_url).await else {
+            let Ok((mut socket, _)) = connect_to_relay(&relay_url, config.tls_ca_cert_path.as_deref()).await else {
                 let _ = events.send(super::NetworkEvent::Disconnected);
                 return;
+            };
+            let secure_channel = match config.server_rsa_public_key_path.as_deref() {
+                Some(path) => match begin_application_encryption(&mut socket, path).await {
+                    Ok(channel) => Some(channel),
+                    Err(error) => {
+                        let _ = events.send(super::NetworkEvent::Error(format!(
+                            "无法建立加密连接：{error}"
+                        )));
+                        let _ = events.send(super::NetworkEvent::Disconnected);
+                        return;
+                    }
+                },
+                None => None,
             };
             let hello = ClientEvent::Hello {
                 protocol_version: PROTOCOL_VERSION,
@@ -835,10 +857,7 @@ mod network {
                 activity: None,
             };
             for event in [hello, register_code, presence] {
-                let Ok(json) = serde_json::to_string(&event) else {
-                    continue;
-                };
-                if socket.send(Message::Text(json.into())).await.is_err() {
+                if send_client_event(&mut socket, secure_channel.as_ref(), &event).await.is_err() {
                     let _ = events.send(super::NetworkEvent::Disconnected);
                     return;
                 }
@@ -850,10 +869,7 @@ mod network {
             loop {
                 tokio::select! {
                     _ = ping_timer.tick() => {
-                        let Ok(json) = serde_json::to_string(&ClientEvent::Ping) else {
-                            continue;
-                        };
-                        if socket.send(Message::Text(json.into())).await.is_err() {
+                        if send_client_event(&mut socket, secure_channel.as_ref(), &ClientEvent::Ping).await.is_err() {
                             break;
                         }
                         ping_sent_at = Some(Instant::now());
@@ -868,10 +884,7 @@ mod network {
                             }
                             super::NetworkCommand::PairWithCode(code) => ClientEvent::PairWithCode { code },
                         };
-                        let Ok(json) = serde_json::to_string(&event) else {
-                            continue;
-                        };
-                        if socket.send(Message::Text(json.into())).await.is_err() {
+                        if send_client_event(&mut socket, secure_channel.as_ref(), &event).await.is_err() {
                             break;
                         }
                     }
@@ -882,7 +895,16 @@ mod network {
                         if !message.is_text() {
                             continue;
                         }
-                        let Ok(event) = serde_json::from_str::<ServerEvent>(message.to_text().unwrap_or_default()) else {
+                        let event = if let Some(channel) = &secure_channel {
+                            let Ok(ServerFrame::Encrypted { frame }) = serde_json::from_str(message.to_text().unwrap_or_default()) else {
+                                continue;
+                            };
+                            channel.decrypt(&frame)
+                        } else {
+                            serde_json::from_str::<ServerEvent>(message.to_text().unwrap_or_default())
+                                .map_err(|error| error.to_string())
+                        };
+                        let Ok(event) = event else {
                             continue;
                         };
                         match event {
@@ -913,5 +935,72 @@ mod network {
             }
             let _ = events.send(super::NetworkEvent::Disconnected);
         });
+    }
+
+    type RelaySocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn begin_application_encryption(
+        socket: &mut RelaySocket,
+        public_key_path: &Path,
+    ) -> anyhow::Result<SecureChannel> {
+        let pem = fs::read_to_string(public_key_path)?;
+        let public_key = RsaPublicKey::from_public_key_pem(&pem)?;
+        if public_key.n().bits() < 2048 {
+            anyhow::bail!("服务端 RSA 公钥必须至少为 2048 位");
+        }
+        let (channel, session_key) = SecureChannel::generate();
+        let encrypted_session_key = encrypt_session_key(&public_key, &session_key)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let handshake = ClientFrame::SecureHandshake {
+            encrypted_session_key,
+        };
+        socket
+            .send(Message::Text(serde_json::to_string(&handshake)?.into()))
+            .await?;
+        Ok(channel)
+    }
+
+    async fn send_client_event(
+        socket: &mut RelaySocket,
+        secure_channel: Option<&SecureChannel>,
+        event: &ClientEvent,
+    ) -> anyhow::Result<()> {
+        let json = if let Some(channel) = secure_channel {
+            let frame = channel
+                .encrypt(event)
+                .map_err(|error| anyhow::anyhow!(error))?;
+            serde_json::to_string(&ClientFrame::Encrypted { frame })?
+        } else {
+            serde_json::to_string(event)?
+        };
+        socket.send(Message::Text(json.into())).await?;
+        Ok(())
+    }
+
+    async fn connect_to_relay(
+        relay_url: &str,
+        tls_ca_cert_path: Option<&Path>,
+    ) -> anyhow::Result<(
+        RelaySocket,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    )> {
+        if Url::parse(relay_url)?.scheme() != "wss" {
+            return Ok(connect_async(relay_url).await?);
+        }
+
+        let connector = tls_ca_cert_path
+            .map(|path| -> anyhow::Result<Connector> {
+                let pem = fs::read(path)?;
+                let mut builder = native_tls::TlsConnector::builder();
+                for certificate in Certificate::stack_from_pem(&pem)? {
+                    builder.add_root_certificate(certificate);
+                }
+                Ok(Connector::NativeTls(builder.build()?))
+            })
+            .transpose()?;
+
+        Ok(connect_async_tls_with_config(relay_url, None, false, connector).await?)
     }
 }

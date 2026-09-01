@@ -13,6 +13,10 @@ pub struct ClientConfig {
     pub pairing_code: String,
     /// Prefer a relay announced on the current LAN before using `relay_url`.
     pub discover_lan_relay: bool,
+    /// Optional PEM certificate or CA bundle trusted for `wss://` without a public CA.
+    pub tls_ca_cert_path: Option<PathBuf>,
+    /// PEM RSA public key pinned for encrypted `ws://` relay connections.
+    pub server_rsa_public_key_path: Option<PathBuf>,
     /// The setting is opt-in and is shown in the UI before any activity is sent.
     pub share_active_app: bool,
 }
@@ -29,6 +33,9 @@ impl Default for ClientConfig {
             pairing_code: std::env::var("CHICK_PAIRING_CODE")
                 .unwrap_or_else(|_| load_or_create_pairing_code()),
             discover_lan_relay: true,
+            tls_ca_cert_path: std::env::var_os("CHICK_TLS_CA_CERT_PATH").map(PathBuf::from),
+            server_rsa_public_key_path: std::env::var_os("CHICK_SERVER_RSA_PUBLIC_KEY_PATH")
+                .map(PathBuf::from),
             share_active_app: false,
         }
     }

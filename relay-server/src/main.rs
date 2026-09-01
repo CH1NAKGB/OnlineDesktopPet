@@ -10,7 +10,11 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
-use shared_protocol::{ClientEvent, PROTOCOL_VERSION, ServerEvent, is_valid_pairing_code};
+use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey, traits::PublicKeyParts};
+use shared_protocol::{
+    ClientEvent, ClientFrame, PROTOCOL_VERSION, SecureChannel, ServerEvent, ServerFrame,
+    decrypt_session_key, is_valid_pairing_code,
+};
 use tokio::sync::{RwLock, mpsc};
 use tracing::{info, warn};
 
@@ -24,6 +28,7 @@ struct AppState {
     sessions: Sessions,
     pairing_codes: Arc<RwLock<HashMap<String, String>>>,
     partners: Arc<RwLock<HashMap<String, String>>>,
+    encryption_private_key: Option<Arc<RsaPrivateKey>>,
 }
 
 #[tokio::main]
@@ -33,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
         sessions: Arc::default(),
         pairing_codes: Arc::default(),
         partners: Arc::default(),
+        encryption_private_key: load_encryption_private_key()?,
     };
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -55,22 +61,37 @@ async fn main() -> anyhow::Result<()> {
 
 mod lan {
     use super::LAN_SERVICE_TYPE;
+    use std::collections::HashMap;
+
     use mdns_sd::{ServiceDaemon, ServiceInfo};
 
     pub fn announce(port: u16) -> anyhow::Result<ServiceDaemon> {
         let daemon = ServiceDaemon::new()?;
         let ip = local_ip_address::local_ip()?;
-        let properties = [("protocol", "1")];
+        let scheme = std::env::var("LAN_DISCOVERY_SCHEME").unwrap_or_else(|_| "ws".into());
+        let host = std::env::var("LAN_DISCOVERY_HOST").unwrap_or_else(|_| ip.to_string());
+        let advertised_port = std::env::var("LAN_DISCOVERY_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(port);
+        let path = std::env::var("LAN_DISCOVERY_PATH").unwrap_or_else(|_| "/ws".into());
+        let properties = HashMap::from([
+            ("protocol".to_owned(), "1".to_owned()),
+            ("scheme".to_owned(), scheme.clone()),
+            ("host".to_owned(), host.clone()),
+            ("port".to_owned(), advertised_port.to_string()),
+            ("path".to_owned(), path.clone()),
+        ]);
         let info = ServiceInfo::new(
             LAN_SERVICE_TYPE,
             "chick-relay",
             "chick-link-relay.local.",
             ip,
-            port,
-            &properties[..],
+            advertised_port,
+            properties,
         )?;
         daemon.register(info)?;
-        tracing::info!(%ip, %port, "LAN discovery announcement enabled");
+        tracing::info!(%ip, scheme = %scheme, host = %host, port = %advertised_port, path = %path, "LAN discovery announcement enabled");
         Ok(daemon)
     }
 }
@@ -84,10 +105,39 @@ async fn ws_handler(
 
 async fn serve_socket(state: AppState, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
+    let secure_channel = match &state.encryption_private_key {
+        Some(private_key) => {
+            let Some(Ok(Message::Text(text))) = stream.next().await else {
+                return;
+            };
+            let Ok(ClientFrame::SecureHandshake {
+                encrypted_session_key,
+            }) = serde_json::from_str(&text)
+            else {
+                warn!("rejected connection without encrypted handshake");
+                return;
+            };
+            let Ok(session_key) = decrypt_session_key(private_key, &encrypted_session_key) else {
+                warn!("rejected connection with invalid encrypted handshake");
+                return;
+            };
+            Some(SecureChannel::new(session_key))
+        }
+        None => None,
+    };
     let (outbound, mut receiver) = mpsc::unbounded_channel();
+    let writer_channel = secure_channel.clone();
     let writer = tokio::spawn(async move {
         while let Some(event) = receiver.recv().await {
-            let Ok(json) = serde_json::to_string(&event) else {
+            let json = if let Some(channel) = &writer_channel {
+                let Ok(frame) = channel.encrypt(&event) else {
+                    continue;
+                };
+                serde_json::to_string(&ServerFrame::Encrypted { frame })
+            } else {
+                serde_json::to_string(&event)
+            };
+            let Ok(json) = json else {
                 continue;
             };
             if sink.send(Message::Text(json.into())).await.is_err() {
@@ -98,10 +148,19 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
 
     let mut user_id: Option<String> = None;
     while let Some(Ok(Message::Text(text))) = stream.next().await {
-        let Ok(event) = serde_json::from_str::<ClientEvent>(&text) else {
+        let event = if let Some(channel) = &secure_channel {
+            let Ok(ClientFrame::Encrypted { frame }) = serde_json::from_str(&text) else {
+                send_error(&outbound, "invalid_event", "Encrypted message required");
+                continue;
+            };
+            channel.decrypt(&frame)
+        } else {
+            serde_json::from_str::<ClientEvent>(&text).map_err(|error| error.to_string())
+        };
+        let Ok(event) = event else {
             let _ = outbound.send(ServerEvent::Error {
                 code: "invalid_event".into(),
-                message: "Invalid JSON message".into(),
+                message: "Invalid or unauthenticated message".into(),
             });
             continue;
         };
@@ -272,6 +331,20 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
         warn!(user_id = %id, "client disconnected");
     }
     writer.abort();
+}
+
+fn load_encryption_private_key() -> anyhow::Result<Option<Arc<RsaPrivateKey>>> {
+    let Some(path) = std::env::var_os("RELAY_RSA_PRIVATE_KEY_PATH") else {
+        return Ok(None);
+    };
+    let pem = std::fs::read_to_string(&path)?;
+    let private_key = RsaPrivateKey::from_pkcs8_pem(&pem)
+        .map_err(|error| anyhow::anyhow!("invalid RSA private key at {:?}: {error}", path))?;
+    if private_key.n().bits() < 2048 {
+        anyhow::bail!("RSA private key at {:?} must be at least 2048 bits", path);
+    }
+    info!(path = ?path, "application-layer relay encryption enabled");
+    Ok(Some(Arc::new(private_key)))
 }
 
 fn send_error(outbound: &Tx, code: &str, message: &str) {

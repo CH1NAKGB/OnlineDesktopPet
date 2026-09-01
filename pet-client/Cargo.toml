@@ -13,8 +13,10 @@ egui = "0.31"
 egui-wgpu = "0.31"
 egui-winit = { version = "0.31", default-features = false, features = ["clipboard"] }
 mdns-sd = "0.21"
+native-tls = "0.2"
 pollster = "0.4"
 rand = "0.9"
+rsa = "0.9"
 serde.workspace = true
 serde_json.workspace = true
 shared-protocol = { path = "../shared-protocol" }

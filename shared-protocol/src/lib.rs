@@ -1,10 +1,113 @@
 //! Versioned messages exchanged between the desktop client and the relay.
 
-use serde::{Deserialize, Serialize};
+use aes_gcm::{
+    Aes256Gcm, KeyInit, Nonce,
+    aead::{Aead, OsRng, rand_core::RngCore},
+};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::Sha256;
 
 pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_TEXT_CHARS: usize = 2_000;
 pub const PAIRING_CODE_LEN: usize = 8;
+pub const SESSION_KEY_LEN: usize = 32;
+
+/// The unencrypted first message of an application-encrypted WebSocket session.
+/// The RSA-encrypted session key is safe to send over `ws://` only when the
+/// client obtained the server public key through a trusted, out-of-band channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientFrame {
+    SecureHandshake { encrypted_session_key: String },
+    Encrypted { frame: EncryptedFrame },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServerFrame {
+    Encrypted { frame: EncryptedFrame },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedFrame {
+    pub nonce: String,
+    pub ciphertext: String,
+}
+
+#[derive(Clone)]
+pub struct SecureChannel {
+    key: [u8; SESSION_KEY_LEN],
+}
+
+impl SecureChannel {
+    pub fn new(key: [u8; SESSION_KEY_LEN]) -> Self {
+        Self { key }
+    }
+
+    pub fn generate() -> (Self, [u8; SESSION_KEY_LEN]) {
+        let mut key = [0; SESSION_KEY_LEN];
+        OsRng.fill_bytes(&mut key);
+        (Self::new(key), key)
+    }
+
+    pub fn encrypt<T: Serialize>(&self, value: &T) -> Result<EncryptedFrame, String> {
+        let plaintext = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+        let mut nonce_bytes = [0; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|error| error.to_string())?;
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+            .map_err(|error| error.to_string())?;
+        Ok(EncryptedFrame {
+            nonce: BASE64.encode(nonce_bytes),
+            ciphertext: BASE64.encode(ciphertext),
+        })
+    }
+
+    pub fn decrypt<T: DeserializeOwned>(&self, frame: &EncryptedFrame) -> Result<T, String> {
+        let nonce = BASE64
+            .decode(&frame.nonce)
+            .map_err(|error| error.to_string())?;
+        let nonce: [u8; 12] = nonce
+            .try_into()
+            .map_err(|_| "encrypted frame nonce must be 12 bytes".to_owned())?;
+        let ciphertext = BASE64
+            .decode(&frame.ciphertext)
+            .map_err(|error| error.to_string())?;
+        let cipher = Aes256Gcm::new_from_slice(&self.key).map_err(|error| error.to_string())?;
+        let plaintext = cipher
+            .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+            .map_err(|_| "encrypted frame authentication failed".to_owned())?;
+        serde_json::from_slice(&plaintext).map_err(|error| error.to_string())
+    }
+}
+
+pub fn encrypt_session_key(
+    public_key: &RsaPublicKey,
+    session_key: &[u8; SESSION_KEY_LEN],
+) -> Result<String, String> {
+    let encrypted = public_key
+        .encrypt(&mut OsRng, Oaep::new::<Sha256>(), session_key)
+        .map_err(|error| error.to_string())?;
+    Ok(BASE64.encode(encrypted))
+}
+
+pub fn decrypt_session_key(
+    private_key: &RsaPrivateKey,
+    encrypted_session_key: &str,
+) -> Result<[u8; SESSION_KEY_LEN], String> {
+    let encrypted = BASE64
+        .decode(encrypted_session_key)
+        .map_err(|error| error.to_string())?;
+    let session_key = private_key
+        .decrypt(Oaep::new::<Sha256>(), &encrypted)
+        .map_err(|_| "RSA session-key decryption failed".to_owned())?;
+    session_key
+        .try_into()
+        .map_err(|_| "invalid decrypted session-key length".to_owned())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -194,5 +297,25 @@ mod tests {
         assert!(is_valid_pairing_code("7KQ3M9XZ"));
         assert!(!is_valid_pairing_code("7KQ3MI9Z"));
         assert!(!is_valid_pairing_code("short"));
+    }
+
+    #[test]
+    fn secure_channel_rejects_tampered_ciphertext() {
+        let (channel, _) = SecureChannel::generate();
+        let mut frame = channel.encrypt(&ClientEvent::Ping).expect("encrypt event");
+        frame.ciphertext.push('A');
+        assert!(channel.decrypt::<ClientEvent>(&frame).is_err());
+    }
+
+    #[test]
+    fn rsa_protects_the_session_key() {
+        let private_key = RsaPrivateKey::new(&mut OsRng, 2048).expect("generate key");
+        let (_, session_key) = SecureChannel::generate();
+        let encrypted = encrypt_session_key(&RsaPublicKey::from(&private_key), &session_key)
+            .expect("encrypt session key");
+        assert_eq!(
+            decrypt_session_key(&private_key, &encrypted).expect("decrypt key"),
+            session_key
+        );
     }
 }
