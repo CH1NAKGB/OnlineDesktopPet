@@ -7,7 +7,7 @@ use winit::{
     dpi::LogicalSize,
     event::WindowEvent,
     event_loop::ActiveEventLoop,
-    window::{Window, WindowId},
+    window::{Theme, Window, WindowId},
 };
 
 use crate::chat::{self, ChatEntry};
@@ -32,6 +32,7 @@ pub struct ChatWindow {
     own_code: String,
     partner_id: Option<String>,
     status: String,
+    dark_mode: bool,
 }
 
 impl ChatWindow {
@@ -89,7 +90,8 @@ impl ChatWindow {
         surface.configure(&device, &config);
         let context = egui::Context::default();
         configure_fonts(&context);
-        configure_style(&context);
+        let dark_mode = matches!(window.theme(), Some(Theme::Dark));
+        configure_style(&context, dark_mode);
         let state = egui_winit::State::new(
             context.clone(),
             egui::ViewportId::ROOT,
@@ -113,7 +115,8 @@ impl ChatWindow {
             pair_input: String::new(),
             own_code,
             partner_id,
-            status: "Ready".into(),
+            status: "等待输入对方配对码".into(),
+            dark_mode,
         })
     }
 
@@ -129,7 +132,7 @@ impl ChatWindow {
 
     pub fn set_partner(&mut self, partner_id: String) {
         self.partner_id = Some(partner_id);
-        self.status = "Paired and online".into();
+        self.status = "已配对并在线".into();
         self.window.request_redraw();
     }
 
@@ -165,6 +168,11 @@ impl ChatWindow {
                 self.config.height = size.height;
                 self.surface.configure(&self.device, &self.config);
             }
+            WindowEvent::ThemeChanged(theme) => {
+                self.dark_mode = matches!(theme, Theme::Dark);
+                configure_style(&self.context, self.dark_mode);
+                self.window.request_redraw();
+            }
             WindowEvent::RedrawRequested => return self.render(),
             _ => {}
         }
@@ -175,112 +183,242 @@ impl ChatWindow {
         let raw_input = self.state.take_egui_input(&self.window);
         let mut actions = Vec::new();
         let partner_id = self.partner_id.clone();
+        let colors = Palette::new(self.dark_mode);
         let output = self.context.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.heading(
-                    RichText::new("Chick Link")
-                        .size(25.0)
-                        .color(Color32::from_rgb(42, 55, 48)),
-                );
-                ui.label(RichText::new(&self.status).color(Color32::from_rgb(74, 119, 91)));
-                ui.add_space(10.0);
-                if partner_id.is_none() {
-                    ui.group(|ui| {
-                        ui.label("我的配对码");
-                        ui.label(
-                            RichText::new(&self.own_code)
-                                .monospace()
-                                .size(28.0)
-                                .strong(),
-                        );
-                        if ui.button("复制配对码").clicked() {
-                            ui.ctx().copy_text(self.own_code.clone());
-                        }
-                    });
-                    ui.add_space(16.0);
-                    ui.label("输入对方的 8 位配对码");
-                    let response = ui.text_edit_singleline(&mut self.pair_input);
-                    self.pair_input.make_ascii_uppercase();
-                    let valid = shared_protocol::is_valid_pairing_code(self.pair_input.trim());
-                    if ui
-                        .add_enabled(valid, egui::Button::new("建立共同小鸡"))
-                        .clicked()
-                        || (valid
-                            && response.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                    {
-                        actions.push(ChatAction::Pair(self.pair_input.trim().to_owned()));
-                        self.status = "Pairing...".into();
-                    }
-                    return;
-                }
-
-                ui.horizontal(|ui| {
-                    ui.label("共同小鸡");
-                    ui.strong(partner_id.as_deref().unwrap_or_default());
-                });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .max_height(ui.available_height() - 150.0)
-                    .show(ui, |ui| {
-                        for entry in &self.history {
-                            let fill = if entry.outgoing {
-                                Color32::from_rgb(205, 240, 190)
-                            } else {
-                                Color32::from_rgb(243, 236, 215)
-                            };
-                            ui.with_layout(
-                                if entry.outgoing {
-                                    egui::Layout::right_to_left(egui::Align::TOP)
-                                } else {
-                                    egui::Layout::left_to_right(egui::Align::TOP)
-                                },
-                                |ui| {
-                                    egui::Frame::default().fill(fill).inner_margin(10.0).show(
-                                        ui,
-                                        |ui| {
-                                            ui.set_max_width(300.0);
-                                            ui.label(&entry.text);
-                                        },
-                                    );
-                                },
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::default()
+                        .fill(colors.background)
+                        .inner_margin(24.0),
+                )
+                .show(ctx, |ui| {
+                    if partner_id.is_none() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(22.0);
+                            ui.label(
+                                RichText::new("CHICK LINK")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(colors.accent),
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("一起养一只小鸡")
+                                    .size(25.0)
+                                    .strong()
+                                    .color(colors.text),
                             );
                             ui.add_space(5.0);
+                            ui.label(
+                                RichText::new("交换配对码后，两台电脑就会连接起来")
+                                    .size(13.0)
+                                    .color(colors.muted),
+                            );
+                            ui.add_space(24.0);
+
+                            let card_width = ui.available_width().min(342.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(card_width, 0.0),
+                                egui::Layout::top_down(egui::Align::Center),
+                                |ui| {
+                                    egui::Frame::default()
+                                        .fill(colors.card)
+                                        .stroke(egui::Stroke::new(1.0_f32, colors.border))
+                                        .corner_radius(14.0)
+                                        .inner_margin(20.0)
+                                        .show(ui, |ui| {
+                                            let content_width = ui.available_width();
+                                            ui.set_width(content_width);
+                                            ui.label(
+                                                RichText::new("我的配对码")
+                                                    .size(13.0)
+                                                    .color(colors.muted),
+                                            );
+                                            ui.add_space(8.0);
+                                            ui.label(
+                                                RichText::new(spaced_code(&self.own_code))
+                                                    .monospace()
+                                                    .size(27.0)
+                                                    .strong()
+                                                    .color(colors.text),
+                                            );
+                                            ui.add_space(10.0);
+                                            if ui
+                                                .add_sized(
+                                                    [content_width, 34.0],
+                                                    egui::Button::new("复制配对码"),
+                                                )
+                                                .clicked()
+                                            {
+                                                ui.ctx().copy_text(self.own_code.clone());
+                                                self.status = "配对码已复制".into();
+                                            }
+                                            ui.add_space(18.0);
+                                            ui.separator();
+                                            ui.add_space(16.0);
+                                            ui.with_layout(
+                                                egui::Layout::left_to_right(egui::Align::Center),
+                                                |ui| {
+                                                    ui.label(
+                                                        RichText::new("输入对方配对码")
+                                                            .size(13.0)
+                                                            .color(colors.muted),
+                                                    );
+                                                },
+                                            );
+                                            ui.add_space(7.0);
+                                            let response = ui.add_sized(
+                                                [content_width, 42.0],
+                                                egui::TextEdit::singleline(&mut self.pair_input)
+                                                    .font(egui::TextStyle::Monospace)
+                                                    .hint_text("例如 7KQ3M9XZ")
+                                                    .horizontal_align(egui::Align::Center),
+                                            );
+                                            self.pair_input.make_ascii_uppercase();
+                                            let valid = shared_protocol::is_valid_pairing_code(
+                                                self.pair_input.trim(),
+                                            );
+                                            ui.add_space(10.0);
+                                            let submit = ui
+                                                .add_enabled(
+                                                    valid,
+                                                    egui::Button::new(
+                                                        RichText::new("建立共同小鸡").strong(),
+                                                    )
+                                                    .min_size(egui::vec2(content_width, 42.0)),
+                                                )
+                                                .clicked()
+                                                || (valid
+                                                    && response.lost_focus()
+                                                    && ui.input(|i| {
+                                                        i.key_pressed(egui::Key::Enter)
+                                                    }));
+                                            if submit {
+                                                actions.push(ChatAction::Pair(
+                                                    self.pair_input.trim().to_owned(),
+                                                ));
+                                                self.status = "正在连接对方...".into();
+                                            }
+                                        });
+                                },
+                            );
+                            ui.add_space(14.0);
+                            ui.label(
+                                RichText::new(&self.status)
+                                    .size(12.0)
+                                    .color(status_color(&self.status, colors)),
+                            );
+                        });
+                        return;
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("共同小鸡")
+                                    .size(20.0)
+                                    .strong()
+                                    .color(colors.text),
+                            );
+                            ui.label(
+                                RichText::new(partner_id.as_deref().unwrap_or_default())
+                                    .size(12.0)
+                                    .color(colors.muted),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            egui::Frame::default()
+                                .fill(colors.status_bg)
+                                .corner_radius(12.0)
+                                .inner_margin(egui::Margin::symmetric(10, 5))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new("● 在线").size(12.0).color(colors.accent),
+                                    );
+                                });
+                        });
+                    });
+                    ui.add_space(12.0);
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(true)
+                        .max_height((ui.available_height() - 145.0).max(120.0))
+                        .show(ui, |ui| {
+                            ui.add_space(10.0);
+                            for entry in &self.history {
+                                let fill = if entry.outgoing {
+                                    colors.outgoing
+                                } else {
+                                    colors.incoming
+                                };
+                                ui.with_layout(
+                                    if entry.outgoing {
+                                        egui::Layout::right_to_left(egui::Align::TOP)
+                                    } else {
+                                        egui::Layout::left_to_right(egui::Align::TOP)
+                                    },
+                                    |ui| {
+                                        egui::Frame::default()
+                                            .fill(fill)
+                                            .corner_radius(11.0)
+                                            .inner_margin(egui::Margin::symmetric(12, 9))
+                                            .show(ui, |ui| {
+                                                ui.set_max_width(
+                                                    (ui.available_width() * 0.78).min(290.0),
+                                                );
+                                                ui.label(
+                                                    RichText::new(&entry.text)
+                                                        .size(14.0)
+                                                        .color(colors.text),
+                                                );
+                                            });
+                                    },
+                                );
+                                ui.add_space(7.0);
+                            }
+                        });
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(7.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for quick in ["想你啦", "摸摸小鸡", "忙完找你", "晚安"] {
+                            if ui.small_button(quick).clicked() {
+                                actions.push(ChatAction::Send(quick.into()));
+                            }
                         }
                     });
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    for quick in ["想你啦", "摸摸小鸡", "忙完找你", "晚安"] {
-                        if ui.small_button(quick).clicked() {
-                            actions.push(ChatAction::Send(quick.into()));
+                    ui.add_space(7.0);
+                    ui.horizontal(|ui| {
+                        let send_width = 68.0;
+                        let editor_width = (ui.available_width() - send_width - 10.0).max(160.0);
+                        let response = ui.add_sized(
+                            [editor_width, 54.0],
+                            egui::TextEdit::multiline(&mut self.input).hint_text("输入消息..."),
+                        );
+                        let submit = ui
+                            .add_sized(
+                                [send_width, 54.0],
+                                egui::Button::new(RichText::new("发送").strong()),
+                            )
+                            .clicked()
+                            || (response.has_focus()
+                                && ui.input(|i| {
+                                    i.key_pressed(egui::Key::Enter) && !i.modifiers.shift
+                                }));
+                        if submit {
+                            let text = self
+                                .input
+                                .trim()
+                                .chars()
+                                .take(shared_protocol::MAX_TEXT_CHARS)
+                                .collect::<String>();
+                            if !text.is_empty() {
+                                actions.push(ChatAction::Send(text));
+                                self.input.clear();
+                            }
                         }
-                    }
+                    });
                 });
-                ui.horizontal(|ui| {
-                    let response = ui.add_sized(
-                        [ui.available_width() - 72.0, 52.0],
-                        egui::TextEdit::multiline(&mut self.input).hint_text("输入消息..."),
-                    );
-                    let submit = ui
-                        .add_sized([64.0, 52.0], egui::Button::new("发送"))
-                        .clicked()
-                        || (response.has_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift));
-                    if submit {
-                        let text = self
-                            .input
-                            .trim()
-                            .chars()
-                            .take(shared_protocol::MAX_TEXT_CHARS)
-                            .collect::<String>();
-                        if !text.is_empty() {
-                            actions.push(ChatAction::Send(text));
-                            self.input.clear();
-                        }
-                    }
-                });
-            });
         });
         self.state
             .handle_platform_output(&self.window, output.platform_output);
@@ -317,9 +455,9 @@ impl ChatWindow {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.96,
-                            g: 0.94,
-                            b: 0.88,
+                            r: colors.background.r() as f64 / 255.0,
+                            g: colors.background.g() as f64 / 255.0,
+                            b: colors.background.b() as f64 / 255.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -342,14 +480,93 @@ impl ChatWindow {
     }
 }
 
-fn configure_style(context: &egui::Context) {
+fn configure_style(context: &egui::Context, dark_mode: bool) {
+    let colors = Palette::new(dark_mode);
     let mut style = (*context.style()).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
-    style.visuals.window_fill = Color32::from_rgb(247, 241, 224);
-    style.visuals.panel_fill = Color32::from_rgb(247, 241, 224);
-    style.visuals.widgets.active.bg_fill = Color32::from_rgb(232, 171, 61);
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(242, 191, 88);
+    style.spacing.button_padding = egui::vec2(14.0, 8.0);
+    style.visuals = if dark_mode {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    style.visuals.window_fill = colors.background;
+    style.visuals.panel_fill = colors.background;
+    style.visuals.extreme_bg_color = colors.input;
+    style.visuals.widgets.inactive.bg_fill = colors.button;
+    style.visuals.widgets.inactive.fg_stroke.color = colors.text;
+    style.visuals.widgets.active.bg_fill = colors.accent;
+    style.visuals.widgets.hovered.bg_fill = colors.accent_hover;
+    style.visuals.selection.bg_fill = colors.accent.linear_multiply(0.65);
+    style.visuals.widgets.noninteractive.fg_stroke.color = colors.text;
     context.set_style(style);
+}
+
+#[derive(Clone, Copy)]
+struct Palette {
+    background: Color32,
+    card: Color32,
+    input: Color32,
+    button: Color32,
+    border: Color32,
+    text: Color32,
+    muted: Color32,
+    accent: Color32,
+    accent_hover: Color32,
+    status_bg: Color32,
+    outgoing: Color32,
+    incoming: Color32,
+}
+
+impl Palette {
+    fn new(dark: bool) -> Self {
+        if dark {
+            Self {
+                background: Color32::from_rgb(25, 28, 26),
+                card: Color32::from_rgb(35, 39, 36),
+                input: Color32::from_rgb(28, 32, 29),
+                button: Color32::from_rgb(47, 53, 48),
+                border: Color32::from_rgb(63, 70, 64),
+                text: Color32::from_rgb(238, 237, 230),
+                muted: Color32::from_rgb(158, 166, 158),
+                accent: Color32::from_rgb(232, 177, 65),
+                accent_hover: Color32::from_rgb(244, 193, 83),
+                status_bg: Color32::from_rgb(35, 53, 41),
+                outgoing: Color32::from_rgb(55, 79, 60),
+                incoming: Color32::from_rgb(48, 51, 47),
+            }
+        } else {
+            Self {
+                background: Color32::from_rgb(246, 244, 237),
+                card: Color32::from_rgb(255, 253, 247),
+                input: Color32::from_rgb(250, 249, 244),
+                button: Color32::from_rgb(237, 234, 224),
+                border: Color32::from_rgb(219, 215, 202),
+                text: Color32::from_rgb(43, 48, 44),
+                muted: Color32::from_rgb(111, 119, 112),
+                accent: Color32::from_rgb(190, 125, 24),
+                accent_hover: Color32::from_rgb(218, 151, 38),
+                status_bg: Color32::from_rgb(226, 240, 228),
+                outgoing: Color32::from_rgb(214, 237, 211),
+                incoming: Color32::from_rgb(238, 234, 224),
+            }
+        }
+    }
+}
+
+fn spaced_code(code: &str) -> String {
+    code.chars()
+        .map(|character| character.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn status_color(status: &str, colors: Palette) -> Color32 {
+    if status.contains("不存在") || status.contains("invalid") || status.contains("already") {
+        Color32::from_rgb(211, 85, 74)
+    } else {
+        colors.muted
+    }
 }
 
 fn configure_fonts(context: &egui::Context) {
