@@ -4,7 +4,7 @@ The relay container is x86_64-compatible and can run on the Alibaba Cloud CentOS
 
 The distributable `ChickLink-server-docker-source.zip` contains only the Rust workspace files and deployment configuration required for this build. Extract it on the server before running the commands below; generated `target/` files are intentionally excluded.
 
-CentOS 7 is end-of-life. Keep this machine limited to the relay role, patch Docker regularly, and plan an upgrade to a supported distribution before opening it to users.
+CentOS 7 reached end-of-life on June 30, 2024, and current Docker documentation only lists maintained CentOS Stream releases. Keep this machine limited to a short-lived relay test. Before opening it to users, replace the system with Alibaba Cloud Linux 3, Rocky Linux 9, or Ubuntu 24.04 LTS. See `deployment-intake.md` for the access and network information needed for a managed deployment.
 
 ## Relay Host
 

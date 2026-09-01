@@ -61,10 +61,15 @@ enum NetworkEvent {
     SharedPetAction(SharedPetAction),
     DirectMessage {
         sender_id: String,
+        sender_display_name: Option<String>,
         body: MessageBody,
     },
     PairingCodeRegistered(String),
-    Paired(String),
+    Paired {
+        partner_id: String,
+        partner_display_name: Option<String>,
+    },
+    ProfileUpdated(String),
     Error(String),
     Disconnected,
 }
@@ -80,6 +85,7 @@ enum NetworkCommand {
         body: MessageBody,
     },
     PairWithCode(String),
+    UpdateProfile(String),
 }
 
 #[cfg(target_os = "macos")]
@@ -381,6 +387,8 @@ struct PetApp {
     network_events: mpsc::Receiver<NetworkEvent>,
     network_commands: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
     partner_id: Option<String>,
+    partner_display_name: Option<String>,
+    display_name: String,
     pairing_code: String,
     bubble: Option<(String, Instant)>,
     chat_window: Option<ChatWindow>,
@@ -402,6 +410,7 @@ impl PetApp {
         network_commands: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
         partner_id: Option<String>,
         pairing_code: String,
+        display_name: String,
         open_chat_on_start: bool,
     ) -> Self {
         Self {
@@ -415,6 +424,8 @@ impl PetApp {
             network_events,
             network_commands,
             partner_id,
+            partner_display_name: None,
+            display_name,
             pairing_code,
             bubble: None,
             chat_window: None,
@@ -468,6 +479,7 @@ impl PetApp {
                 event_loop,
                 self.pairing_code.clone(),
                 self.partner_id.clone(),
+                self.display_name.clone(),
             )) {
                 Ok(window) => self.chat_window = Some(window),
                 Err(error) => {
@@ -501,6 +513,18 @@ impl PetApp {
                         recipient_id,
                         body: MessageBody::Text { text },
                     });
+                }
+                ChatAction::Rename(name) => {
+                    let Some(name) = config::save_display_name(&name) else {
+                        continue;
+                    };
+                    self.display_name = name.clone();
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.set_display_name(name.clone());
+                    }
+                    let _ = self
+                        .network_commands
+                        .send(NetworkCommand::UpdateProfile(name));
                 }
             }
         }
@@ -705,16 +729,21 @@ impl ApplicationHandler for PetApp {
                 NetworkEvent::Latency(rtt) => self.latency_ms = Some(rtt.as_millis() as u32),
                 NetworkEvent::Disconnected => self.latency_ms = None,
                 NetworkEvent::SharedPetAction(action) => self.apply_shared_action(action, false),
-                NetworkEvent::DirectMessage { sender_id, body } => {
+                NetworkEvent::DirectMessage {
+                    sender_id,
+                    sender_display_name,
+                    body,
+                } => {
                     if let MessageBody::Text { text } = body {
-                        let entry = chat::ChatEntry::new(false, sender_id.clone(), text.clone());
+                        let sender_name = sender_display_name.unwrap_or(sender_id);
+                        let entry = chat::ChatEntry::new(false, sender_name.clone(), text.clone());
                         if let Some(chat_window) = self.chat_window.as_mut() {
                             chat_window.push_message(entry);
                         } else {
                             chat::append_history(&entry);
                         }
                         self.bubble = Some((
-                            format!("{sender_id}: {text}"),
+                            format!("{sender_name}: {text}"),
                             Instant::now() + Duration::from_secs(8),
                         ));
                     }
@@ -725,10 +754,20 @@ impl ApplicationHandler for PetApp {
                         chat_window.set_pairing_code(code);
                     }
                 }
-                NetworkEvent::Paired(partner_id) => {
+                NetworkEvent::Paired {
+                    partner_id,
+                    partner_display_name,
+                } => {
                     self.partner_id = Some(partner_id.clone());
+                    self.partner_display_name = partner_display_name.clone();
                     if let Some(chat_window) = self.chat_window.as_mut() {
-                        chat_window.set_partner(partner_id);
+                        chat_window.set_partner(partner_id, partner_display_name);
+                    }
+                }
+                NetworkEvent::ProfileUpdated(display_name) => {
+                    self.partner_display_name = Some(display_name.clone());
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.set_partner_display_name(display_name);
                     }
                 }
                 NetworkEvent::Error(message) => {
@@ -779,6 +818,7 @@ fn main() -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::channel();
     let partner_id = config.partner_id.clone();
     let pairing_code = config.pairing_code.clone();
+    let display_name = config.display_name.clone();
     let open_chat_on_start = std::env::var("CHICK_OPEN_CHAT")
         .ok()
         .as_deref()
@@ -791,6 +831,7 @@ fn main() -> anyhow::Result<()> {
         commands_tx,
         partner_id,
         pairing_code,
+        display_name,
         open_chat_on_start,
     ))?;
     Ok(())
@@ -848,6 +889,7 @@ mod network {
                 protocol_version: PROTOCOL_VERSION,
                 access_token: config.access_token,
                 device_id: config.device_id,
+                display_name: Some(config.display_name),
             };
             let register_code = ClientEvent::RegisterPairingCode {
                 code: config.pairing_code,
@@ -883,6 +925,9 @@ mod network {
                                 ClientEvent::DirectMessage { recipient_id, body }
                             }
                             super::NetworkCommand::PairWithCode(code) => ClientEvent::PairWithCode { code },
+                            super::NetworkCommand::UpdateProfile(display_name) => {
+                                ClientEvent::UpdateProfile { display_name }
+                            }
                         };
                         if send_client_event(&mut socket, secure_channel.as_ref(), &event).await.is_err() {
                             break;
@@ -916,14 +961,17 @@ mod network {
                             ServerEvent::SharedPetAction { action, .. } => {
                                 let _ = events.send(super::NetworkEvent::SharedPetAction(action));
                             }
-                            ServerEvent::DirectMessage { sender_id, body } => {
-                                let _ = events.send(super::NetworkEvent::DirectMessage { sender_id, body });
+                            ServerEvent::DirectMessage { sender_id, sender_display_name, body } => {
+                                let _ = events.send(super::NetworkEvent::DirectMessage { sender_id, sender_display_name, body });
                             }
                             ServerEvent::PairingCodeRegistered { code } => {
                                 let _ = events.send(super::NetworkEvent::PairingCodeRegistered(code));
                             }
-                            ServerEvent::Paired { partner_id } => {
-                                let _ = events.send(super::NetworkEvent::Paired(partner_id));
+                            ServerEvent::Paired { partner_id, partner_display_name } => {
+                                let _ = events.send(super::NetworkEvent::Paired { partner_id, partner_display_name });
+                            }
+                            ServerEvent::ProfileUpdated { display_name, .. } => {
+                                let _ = events.send(super::NetworkEvent::ProfileUpdated(display_name));
                             }
                             ServerEvent::Error { message, .. } => {
                                 let _ = events.send(super::NetworkEvent::Error(message));

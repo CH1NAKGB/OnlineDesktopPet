@@ -28,6 +28,7 @@ struct AppState {
     sessions: Sessions,
     pairing_codes: Arc<RwLock<HashMap<String, String>>>,
     partners: Arc<RwLock<HashMap<String, String>>>,
+    display_names: Arc<RwLock<HashMap<String, String>>>,
     encryption_private_key: Option<Arc<RsaPrivateKey>>,
 }
 
@@ -38,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
         sessions: Arc::default(),
         pairing_codes: Arc::default(),
         partners: Arc::default(),
+        display_names: Arc::default(),
         encryption_private_key: load_encryption_private_key()?,
     };
     let app = Router::new()
@@ -168,6 +170,7 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
             ClientEvent::Hello {
                 protocol_version,
                 access_token,
+                display_name,
                 ..
             } => {
                 if protocol_version != PROTOCOL_VERSION {
@@ -187,10 +190,44 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                     .write()
                     .await
                     .insert(id.clone(), outbound.clone());
+                let display_name = display_name
+                    .as_deref()
+                    .and_then(shared_protocol::normalize_display_name)
+                    .unwrap_or_else(|| id.clone());
+                state
+                    .display_names
+                    .write()
+                    .await
+                    .insert(id.clone(), display_name);
                 let _ = outbound.send(ServerEvent::Ready {
                     user_id: id.clone(),
                 });
                 user_id = Some(id);
+            }
+            ClientEvent::UpdateProfile { display_name } => {
+                let Some(id) = &user_id else { continue };
+                let Some(display_name) = shared_protocol::normalize_display_name(&display_name)
+                else {
+                    send_error(
+                        &outbound,
+                        "invalid_display_name",
+                        "Display name must be 1-24 characters",
+                    );
+                    continue;
+                };
+                state
+                    .display_names
+                    .write()
+                    .await
+                    .insert(id.clone(), display_name.clone());
+                if let Some(partner_id) = state.partners.read().await.get(id).cloned() {
+                    if let Some(peer) = state.sessions.read().await.get(&partner_id) {
+                        let _ = peer.send(ServerEvent::ProfileUpdated {
+                            user_id: id.clone(),
+                            display_name,
+                        });
+                    }
+                }
             }
             ClientEvent::RegisterPairingCode { code } => {
                 let Some(id) = &user_id else { continue };
@@ -241,12 +278,15 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 partners.insert(id.clone(), partner_id.clone());
                 partners.insert(partner_id.clone(), id.clone());
                 drop(partners);
+                let names = state.display_names.read().await;
                 let _ = outbound.send(ServerEvent::Paired {
                     partner_id: partner_id.clone(),
+                    partner_display_name: names.get(&partner_id).cloned(),
                 });
                 if let Some(peer) = state.sessions.read().await.get(&partner_id) {
                     let _ = peer.send(ServerEvent::Paired {
                         partner_id: id.clone(),
+                        partner_display_name: names.get(id).cloned(),
                     });
                 }
             }
@@ -276,8 +316,12 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                     continue;
                 }
                 if let Some(peer) = state.sessions.read().await.get(&recipient_id) {
+                    let sender_id = user_id.clone().unwrap();
+                    let sender_display_name =
+                        state.display_names.read().await.get(&sender_id).cloned();
                     let _ = peer.send(ServerEvent::DirectMessage {
-                        sender_id: user_id.clone().unwrap(),
+                        sender_id,
+                        sender_display_name,
                         body,
                     });
                 }

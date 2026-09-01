@@ -15,6 +15,7 @@ use crate::chat::{self, ChatEntry};
 pub enum ChatAction {
     Pair(String),
     Send(String),
+    Rename(String),
 }
 
 pub struct ChatWindow {
@@ -31,6 +32,10 @@ pub struct ChatWindow {
     pair_input: String,
     own_code: String,
     partner_id: Option<String>,
+    partner_display_name: Option<String>,
+    display_name: String,
+    edit_display_name: String,
+    editing_name: bool,
     status: String,
     dark_mode: bool,
 }
@@ -40,6 +45,7 @@ impl ChatWindow {
         event_loop: &ActiveEventLoop,
         own_code: String,
         partner_id: Option<String>,
+        display_name: String,
     ) -> anyhow::Result<Self> {
         let attributes = Window::default_attributes()
             .with_title("Chick Link Chat")
@@ -115,6 +121,10 @@ impl ChatWindow {
             pair_input: String::new(),
             own_code,
             partner_id,
+            partner_display_name: None,
+            edit_display_name: display_name.clone(),
+            display_name,
+            editing_name: false,
             status: "等待输入对方配对码".into(),
             dark_mode,
         })
@@ -130,9 +140,23 @@ impl ChatWindow {
         self.window.request_redraw();
     }
 
-    pub fn set_partner(&mut self, partner_id: String) {
+    pub fn set_partner(&mut self, partner_id: String, partner_display_name: Option<String>) {
         self.partner_id = Some(partner_id);
+        self.partner_display_name = partner_display_name;
         self.status = "已配对并在线".into();
+        self.window.request_redraw();
+    }
+
+    pub fn set_partner_display_name(&mut self, display_name: String) {
+        self.partner_display_name = Some(display_name);
+        self.window.request_redraw();
+    }
+
+    pub fn set_display_name(&mut self, display_name: String) {
+        self.display_name = display_name.clone();
+        self.edit_display_name = display_name;
+        self.editing_name = false;
+        self.status = "昵称已保存".into();
         self.window.request_redraw();
     }
 
@@ -230,6 +254,45 @@ impl ChatWindow {
                                             let content_width = ui.available_width();
                                             ui.set_width(content_width);
                                             ui.label(
+                                                RichText::new("我的昵称")
+                                                    .size(13.0)
+                                                    .color(colors.muted),
+                                            );
+                                            ui.add_space(7.0);
+                                            let name_response = ui.add_sized(
+                                                [content_width, 38.0],
+                                                egui::TextEdit::singleline(
+                                                    &mut self.edit_display_name,
+                                                )
+                                                .hint_text("给自己起个名字")
+                                                .horizontal_align(egui::Align::Center),
+                                            );
+                                            let normalized_name =
+                                                shared_protocol::normalize_display_name(
+                                                    &self.edit_display_name,
+                                                );
+                                            if name_response.changed() {
+                                                self.status = "昵称修改后需要保存".into();
+                                            }
+                                            ui.add_space(7.0);
+                                            if ui
+                                                .add_enabled(
+                                                    normalized_name.as_deref().is_some_and(
+                                                        |name| name != self.display_name,
+                                                    ),
+                                                    egui::Button::new("保存昵称")
+                                                        .min_size(egui::vec2(content_width, 32.0)),
+                                                )
+                                                .clicked()
+                                            {
+                                                actions.push(ChatAction::Rename(
+                                                    normalized_name.unwrap(),
+                                                ));
+                                            }
+                                            ui.add_space(18.0);
+                                            ui.separator();
+                                            ui.add_space(16.0);
+                                            ui.label(
                                                 RichText::new("我的配对码")
                                                     .size(13.0)
                                                     .color(colors.muted),
@@ -321,9 +384,13 @@ impl ChatWindow {
                                     .color(colors.text),
                             );
                             ui.label(
-                                RichText::new(partner_id.as_deref().unwrap_or_default())
-                                    .size(12.0)
-                                    .color(colors.muted),
+                                RichText::new(
+                                    self.partner_display_name
+                                        .as_deref()
+                                        .unwrap_or_else(|| partner_id.as_deref().unwrap_or("对方")),
+                                )
+                                .size(12.0)
+                                .color(colors.muted),
                             );
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -336,8 +403,46 @@ impl ChatWindow {
                                         RichText::new("● 在线").size(12.0).color(colors.accent),
                                     );
                                 });
+                            if ui
+                                .small_button(format!("我的昵称：{}", self.display_name))
+                                .clicked()
+                            {
+                                self.editing_name = !self.editing_name;
+                            }
                         });
                     });
+                    if self.editing_name {
+                        ui.add_space(10.0);
+                        egui::Frame::default()
+                            .fill(colors.card)
+                            .stroke(egui::Stroke::new(1.0_f32, colors.border))
+                            .corner_radius(10.0)
+                            .inner_margin(10.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let width = (ui.available_width() - 82.0).max(120.0);
+                                    ui.add_sized(
+                                        [width, 34.0],
+                                        egui::TextEdit::singleline(&mut self.edit_display_name),
+                                    );
+                                    let normalized = shared_protocol::normalize_display_name(
+                                        &self.edit_display_name,
+                                    );
+                                    if ui
+                                        .add_enabled(
+                                            normalized
+                                                .as_deref()
+                                                .is_some_and(|name| name != self.display_name),
+                                            egui::Button::new("保存")
+                                                .min_size(egui::vec2(70.0, 34.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        actions.push(ChatAction::Rename(normalized.unwrap()));
+                                    }
+                                });
+                            });
+                    }
                     ui.add_space(12.0);
                     ui.separator();
                     egui::ScrollArea::vertical()

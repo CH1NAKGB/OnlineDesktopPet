@@ -11,6 +11,8 @@ pub struct ClientConfig {
     pub partner_id: Option<String>,
     /// Generated locally and claimed at the relay. Ambiguous characters are omitted.
     pub pairing_code: String,
+    /// User-facing nickname. Internal routing continues to use the authenticated user id.
+    pub display_name: String,
     /// Prefer a relay announced on the current LAN before using `relay_url`.
     pub discover_lan_relay: bool,
     /// Optional PEM certificate or CA bundle trusted for `wss://` without a public CA.
@@ -32,6 +34,11 @@ impl Default for ClientConfig {
             partner_id: std::env::var("CHICK_PARTNER_ID").ok(),
             pairing_code: std::env::var("CHICK_PAIRING_CODE")
                 .unwrap_or_else(|_| load_or_create_pairing_code()),
+            display_name: std::env::var("CHICK_DISPLAY_NAME")
+                .ok()
+                .and_then(|name| shared_protocol::normalize_display_name(&name))
+                .or_else(load_display_name)
+                .unwrap_or_else(|| "小鸡主人".into()),
             discover_lan_relay: true,
             tls_ca_cert_path: std::env::var_os("CHICK_TLS_CA_CERT_PATH").map(PathBuf::from),
             server_rsa_public_key_path: std::env::var_os("CHICK_SERVER_RSA_PUBLIC_KEY_PATH")
@@ -39,6 +46,21 @@ impl Default for ClientConfig {
             share_active_app: false,
         }
     }
+}
+
+pub fn save_display_name(name: &str) -> Option<String> {
+    let name = shared_protocol::normalize_display_name(name)?;
+    let path = app_data_root()?.join("display-name.txt");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    fs::write(path, &name).ok()?;
+    Some(name)
+}
+
+fn load_display_name() -> Option<String> {
+    let name = fs::read_to_string(app_data_root()?.join("display-name.txt")).ok()?;
+    shared_protocol::normalize_display_name(&name)
 }
 
 fn generate_pairing_code() -> String {
@@ -68,6 +90,10 @@ fn load_or_create_pairing_code() -> String {
 }
 
 fn pairing_code_path() -> Option<PathBuf> {
+    Some(app_data_root()?.join("pairing-code.txt"))
+}
+
+fn app_data_root() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     let root = std::env::var_os("APPDATA").map(PathBuf::from);
     #[cfg(target_os = "macos")]
@@ -82,5 +108,5 @@ fn pairing_code_path() -> Option<PathBuf> {
                 .map(PathBuf::from)
                 .map(|home| home.join(".config"))
         });
-    root.map(|root| root.join("ChickLink/pairing-code.txt"))
+    root.map(|root| root.join("ChickLink"))
 }

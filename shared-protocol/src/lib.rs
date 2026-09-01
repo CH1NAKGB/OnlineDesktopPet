@@ -13,6 +13,7 @@ pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_TEXT_CHARS: usize = 2_000;
 pub const PAIRING_CODE_LEN: usize = 8;
 pub const SESSION_KEY_LEN: usize = 32;
+pub const MAX_DISPLAY_NAME_CHARS: usize = 24;
 
 /// The unencrypted first message of an application-encrypted WebSocket session.
 /// The RSA-encrypted session key is safe to send over `ws://` only when the
@@ -116,6 +117,11 @@ pub enum ClientEvent {
         protocol_version: u16,
         access_token: String,
         device_id: String,
+        #[serde(default)]
+        display_name: Option<String>,
+    },
+    UpdateProfile {
+        display_name: String,
     },
     RegisterPairingCode {
         code: String,
@@ -151,6 +157,12 @@ pub enum ServerEvent {
     },
     Paired {
         partner_id: String,
+        #[serde(default)]
+        partner_display_name: Option<String>,
+    },
+    ProfileUpdated {
+        user_id: String,
+        display_name: String,
     },
     Presence {
         user_id: String,
@@ -159,6 +171,8 @@ pub enum ServerEvent {
     },
     DirectMessage {
         sender_id: String,
+        #[serde(default)]
+        sender_display_name: Option<String>,
         body: MessageBody,
     },
     SharedPetAction {
@@ -177,6 +191,13 @@ pub fn is_valid_pairing_code(code: &str) -> bool {
         && code.bytes().all(|byte| {
             matches!(byte, b'2'..=b'9' | b'A'..=b'Z') && !matches!(byte, b'I' | b'L' | b'O')
         })
+}
+
+pub fn normalize_display_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    let count = name.chars().count();
+    (count > 0 && count <= MAX_DISPLAY_NAME_CHARS && !name.chars().any(char::is_control))
+        .then(|| name.to_owned())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -297,6 +318,16 @@ mod tests {
         assert!(is_valid_pairing_code("7KQ3M9XZ"));
         assert!(!is_valid_pairing_code("7KQ3MI9Z"));
         assert!(!is_valid_pairing_code("short"));
+    }
+
+    #[test]
+    fn validates_and_trims_display_names() {
+        assert_eq!(
+            normalize_display_name("  小鸡主人  ").as_deref(),
+            Some("小鸡主人")
+        );
+        assert!(normalize_display_name("").is_none());
+        assert!(normalize_display_name(&"x".repeat(MAX_DISPLAY_NAME_CHARS + 1)).is_none());
     }
 
     #[test]
