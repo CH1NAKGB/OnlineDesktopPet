@@ -39,10 +39,10 @@ cargo run -p pet-client
 客户端每三秒向中继发送一次 `Ping`，依据收到 `Pong` 的实际往返时间显示网络等级。将另一位开发者身份填入环境变量 `CHICK_PARTNER_ID` 后，轻拍和换肤会作为 `SharedPetAction` 发送给对方，双方会更新同一只小鸡的状态：
 
 ```bash
-CHICK_PARTNER_ID=other-owner cargo run -p pet-client
+CHICK_ACCESS_TOKEN=dev:owner-a CHICK_PARTNER_ID=owner-b cargo run -p pet-client
 ```
 
-这里只是开发阶段的点对点路由。生产版本由登录站完成互相授权、写入唯一共同宠物关系并下发配对 ID，不能依赖 `dev:` 身份或允许客户端自行填写对方 ID。
+另一台电脑使用 `CHICK_ACCESS_TOKEN=dev:owner-b CHICK_PARTNER_ID=owner-a`，并把 `CHICK_RELAY_URL` 指向同一个中继即可验证同步。这里只是开发阶段的点对点路由。生产版本由登录站完成互相授权、写入唯一共同宠物关系并下发配对 ID，不能依赖 `dev:` 身份或允许客户端自行填写对方 ID。
 
 ## 局域网联机与搜索
 

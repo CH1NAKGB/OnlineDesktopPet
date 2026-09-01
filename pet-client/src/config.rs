@@ -16,9 +16,11 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            relay_url: "ws://127.0.0.1:8080/ws".into(),
-            access_token: "dev:chick-user".into(),
-            device_id: "local-desktop".into(),
+            relay_url: std::env::var("CHICK_RELAY_URL")
+                .unwrap_or_else(|_| "ws://127.0.0.1:8080/ws".into()),
+            access_token: std::env::var("CHICK_ACCESS_TOKEN")
+                .unwrap_or_else(|_| "dev:chick-user".into()),
+            device_id: std::env::var("CHICK_DEVICE_ID").unwrap_or_else(|_| "local-desktop".into()),
             partner_id: std::env::var("CHICK_PARTNER_ID").ok(),
             discover_lan_relay: true,
             share_active_app: false,
