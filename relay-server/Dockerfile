@@ -1,8 +1,9 @@
-FROM rust:1.85-slim AS build
+FROM rust:1.98-slim AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY shared-protocol ./shared-protocol
 COPY relay-server ./relay-server
+COPY pet-client ./pet-client
 RUN cargo build --release -p relay-server
 
 FROM debian:bookworm-slim

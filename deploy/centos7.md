@@ -2,6 +2,8 @@
 
 The relay container is x86_64-compatible and can run on the Alibaba Cloud CentOS 7.9 host or an x64 Synology Docker host. Build the image on the target host, rather than copying a macOS binary.
 
+The distributable `ChickLink-server-docker-source.zip` contains only the Rust workspace files and deployment configuration required for this build. Extract it on the server before running the commands below; generated `target/` files are intentionally excluded.
+
 CentOS 7 is end-of-life. Keep this machine limited to the relay role, patch Docker regularly, and plan an upgrade to a supported distribution before opening it to users.
 
 ## Relay Host

@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod chat;
 mod config;
 mod frame_pacer;
 mod lan_discovery;
@@ -13,7 +14,7 @@ use std::{
 use config::ClientConfig;
 use frame_pacer::FramePacer;
 use renderer::Renderer;
-use shared_protocol::{PetSkin, SharedPetAction};
+use shared_protocol::{MessageBody, PetSkin, SharedPetAction};
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -25,6 +26,14 @@ use winit::{
 
 #[cfg(target_os = "macos")]
 use muda::{ContextMenu, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(target_os = "windows")]
+use tray_icon::{
+    Icon, TrayIcon, TrayIconBuilder,
+    menu::{
+        Menu as TrayMenu, MenuEvent as TrayMenuEvent, MenuId as TrayMenuId,
+        MenuItem as TrayMenuItem,
+    },
+};
 #[cfg(target_os = "macos")]
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -36,6 +45,10 @@ enum NetworkEvent {
     Connected,
     Latency(Duration),
     SharedPetAction(SharedPetAction),
+    DirectMessage {
+        sender_id: String,
+        body: MessageBody,
+    },
     Disconnected,
 }
 
@@ -44,6 +57,10 @@ enum NetworkCommand {
     SharedPetAction {
         recipient_id: String,
         action: SharedPetAction,
+    },
+    DirectMessage {
+        recipient_id: String,
+        body: MessageBody,
     },
 }
 
@@ -54,6 +71,7 @@ struct PetMenu {
     sunshine: MenuItem,
     blueberry: MenuItem,
     cocoa: MenuItem,
+    chat: MenuItem,
     quality: MenuItem,
     quit: MenuItem,
 }
@@ -74,7 +92,7 @@ impl PetMenu {
         let sunshine = MenuItem::new("日光小鸡", true, None);
         let blueberry = MenuItem::new("蓝莓小鸡", true, None);
         let cocoa = MenuItem::new("可可小鸡", true, None);
-        let chat = MenuItem::new("聊天（界面开发中）", false, None);
+        let chat = MenuItem::new("聊天", partner_id.is_some(), None);
         let quality = MenuItem::new("网络：正在连接", false, None);
         let quit = MenuItem::new("退出 Chick Link", true, None);
 
@@ -99,6 +117,7 @@ impl PetMenu {
             sunshine,
             blueberry,
             cocoa,
+            chat,
             quality,
             quit,
         }
@@ -135,6 +154,8 @@ impl PetMenu {
             Some(MenuAction::Skin(PetSkin::Blueberry))
         } else if id == self.cocoa.id() {
             Some(MenuAction::Skin(PetSkin::Cocoa))
+        } else if id == self.chat.id() {
+            Some(MenuAction::Chat)
         } else if id == self.quit.id() {
             Some(MenuAction::Quit)
         } else {
@@ -147,7 +168,78 @@ impl PetMenu {
 enum MenuAction {
     Pet,
     Skin(PetSkin),
+    Chat,
     Quit,
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsTray {
+    _tray: TrayIcon,
+    chat: TrayMenuItem,
+    show_pet: TrayMenuItem,
+    quit: TrayMenuItem,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsTray {
+    fn new(partner_id: Option<&str>) -> Self {
+        let menu = TrayMenu::new();
+        let chat = TrayMenuItem::new("聊天", partner_id.is_some(), None);
+        let show_pet = TrayMenuItem::new("显示小鸡", true, None);
+        let quit = TrayMenuItem::new("退出 Chick Link", true, None);
+        menu.append(&chat).expect("append tray chat");
+        menu.append(&show_pet).expect("append tray show pet");
+        menu.append(&quit).expect("append tray quit");
+        let icon = Icon::from_rgba(tray_icon_rgba(), 32, 32).expect("create tray icon");
+        let tray = TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_tooltip("Chick Link")
+            .with_icon(icon)
+            .build()
+            .expect("create Windows tray icon");
+        Self {
+            _tray: tray,
+            chat,
+            show_pet,
+            quit,
+        }
+    }
+
+    fn action_for(&self, id: &TrayMenuId) -> Option<TrayAction> {
+        if id == self.chat.id() {
+            Some(TrayAction::Chat)
+        } else if id == self.show_pet.id() {
+            Some(TrayAction::ShowPet)
+        } else if id == self.quit.id() {
+            Some(TrayAction::Quit)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+enum TrayAction {
+    Chat,
+    ShowPet,
+    Quit,
+}
+
+#[cfg(target_os = "windows")]
+fn tray_icon_rgba() -> Vec<u8> {
+    let mut pixels = vec![0; 32 * 32 * 4];
+    for y in 0..32 {
+        for x in 0..32 {
+            let dx = x as f32 - 15.5;
+            let dy = y as f32 - 16.0;
+            let body = dx * dx / 150.0 + dy * dy / 120.0 <= 1.0;
+            let index = (y * 32 + x) * 4;
+            if body {
+                pixels[index..index + 4].copy_from_slice(&[255, 194, 45, 255]);
+            }
+        }
+    }
+    pixels
 }
 
 struct PetApp {
@@ -164,6 +256,8 @@ struct PetApp {
     latency_ms: Option<u32>,
     #[cfg(target_os = "macos")]
     menu: Option<PetMenu>,
+    #[cfg(target_os = "windows")]
+    tray: Option<WindowsTray>,
     #[cfg(target_os = "macos")]
     cursor_position: winit::dpi::PhysicalPosition<f64>,
 }
@@ -188,6 +282,8 @@ impl PetApp {
             latency_ms: None,
             #[cfg(target_os = "macos")]
             menu: None,
+            #[cfg(target_os = "windows")]
+            tray: None,
             #[cfg(target_os = "macos")]
             cursor_position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
         }
@@ -214,6 +310,7 @@ impl PetApp {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn network_label(&self) -> String {
         match self.latency_ms {
             Some(ms) if ms <= 80 => format!("网络：优秀 · {ms} ms"),
@@ -221,6 +318,19 @@ impl PetApp {
             Some(ms) => format!("网络：较弱 · {ms} ms"),
             None => "网络：正在连接".into(),
         }
+    }
+
+    fn open_chat(&self) {
+        let Some(text) = chat::compose(self.partner_id.as_deref()) else {
+            return;
+        };
+        let Some(recipient_id) = self.partner_id.clone() else {
+            return;
+        };
+        let _ = self.network_commands.send(NetworkCommand::DirectMessage {
+            recipient_id,
+            body: MessageBody::Text { text },
+        });
     }
 
     #[cfg(target_os = "macos")]
@@ -235,7 +345,29 @@ impl PetApp {
                 Some(MenuAction::Skin(skin)) => {
                     self.apply_shared_action(SharedPetAction::SetSkin { skin }, true)
                 }
+                Some(MenuAction::Chat) => self.open_chat(),
                 Some(MenuAction::Quit) => event_loop.exit(),
+                None => {}
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn handle_tray_events(&mut self, event_loop: &ActiveEventLoop) {
+        while let Ok(event) = TrayMenuEvent::receiver().try_recv() {
+            let action = self
+                .tray
+                .as_ref()
+                .and_then(|tray| tray.action_for(&event.id));
+            match action {
+                Some(TrayAction::Chat) => self.open_chat(),
+                Some(TrayAction::ShowPet) => {
+                    if let Some(window) = self.window.as_ref() {
+                        window.set_visible(true);
+                        window.focus_window();
+                    }
+                }
+                Some(TrayAction::Quit) => event_loop.exit(),
                 None => {}
             }
         }
@@ -254,6 +386,11 @@ impl ApplicationHandler for PetApp {
             .with_decorations(false)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
+        #[cfg(target_os = "windows")]
+        let attributes = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attributes.with_skip_taskbar(true)
+        };
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
@@ -265,6 +402,10 @@ impl ApplicationHandler for PetApp {
         #[cfg(target_os = "macos")]
         {
             self.menu = Some(PetMenu::new(self.partner_id.as_deref()));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.tray = Some(WindowsTray::new(self.partner_id.as_deref()));
         }
     }
 
@@ -307,12 +448,8 @@ impl ApplicationHandler for PetApp {
                     self.apply_shared_action(SharedPetAction::Pet, true);
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
-                #[cfg(target_os = "macos")]
-                {
-                    self.cursor_position = position;
-                }
-            }
+            #[cfg(target_os = "macos")]
+            WindowEvent::CursorMoved { position, .. } => self.cursor_position = position,
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
@@ -355,6 +492,11 @@ impl ApplicationHandler for PetApp {
                 NetworkEvent::Latency(rtt) => self.latency_ms = Some(rtt.as_millis() as u32),
                 NetworkEvent::Disconnected => self.latency_ms = None,
                 NetworkEvent::SharedPetAction(action) => self.apply_shared_action(action, false),
+                NetworkEvent::DirectMessage { sender_id, body } => {
+                    if let MessageBody::Text { text } = body {
+                        chat::show_incoming(&sender_id, &text);
+                    }
+                }
                 NetworkEvent::Connecting | NetworkEvent::Connected => {}
             }
             #[cfg(target_os = "macos")]
@@ -365,6 +507,8 @@ impl ApplicationHandler for PetApp {
         }
         #[cfg(target_os = "macos")]
         self.handle_menu_events(event_loop);
+        #[cfg(target_os = "windows")]
+        self.handle_tray_events(event_loop);
         match self.pacer.next_wake() {
             Some(when) => event_loop.set_control_flow(ControlFlow::WaitUntil(when)),
             None => {
@@ -458,6 +602,9 @@ mod network {
                             super::NetworkCommand::SharedPetAction { recipient_id, action } => {
                                 ClientEvent::SharedPetAction { recipient_id, action }
                             }
+                            super::NetworkCommand::DirectMessage { recipient_id, body } => {
+                                ClientEvent::DirectMessage { recipient_id, body }
+                            }
                         };
                         let Ok(json) = serde_json::to_string(&event) else {
                             continue;
@@ -484,6 +631,9 @@ mod network {
                             }
                             ServerEvent::SharedPetAction { action, .. } => {
                                 let _ = events.send(super::NetworkEvent::SharedPetAction(action));
+                            }
+                            ServerEvent::DirectMessage { sender_id, body } => {
+                                let _ = events.send(super::NetworkEvent::DirectMessage { sender_id, body });
                             }
                             _ => {}
                         }

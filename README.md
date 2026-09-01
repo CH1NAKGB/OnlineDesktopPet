@@ -34,7 +34,7 @@ cargo run -p pet-client
 
 ## 共同宠物与交互
 
-一只小鸡由两位主人共同操作。macOS 端右键小鸡会显示原生交互菜单，提供轻拍、日光/蓝莓/可可三种换肤、网络质量与 RTT、退出等操作。聊天入口已预留但暂时禁用，直到输入浮层和聊天记录界面完成。
+一只小鸡由两位主人共同操作。macOS 端右键小鸡会显示原生交互菜单，提供轻拍、日光/蓝莓/可可三种换肤、聊天、网络质量与 RTT、退出等操作。Windows 桌宠不会显示在任务栏，聊天、显示桌宠和退出入口位于系统托盘。
 
 客户端每三秒向中继发送一次 `Ping`，依据收到 `Pong` 的实际往返时间显示网络等级。将另一位开发者身份填入环境变量 `CHICK_PARTNER_ID` 后，轻拍和换肤会作为 `SharedPetAction` 发送给对方，双方会更新同一只小鸡的状态：
 
@@ -42,7 +42,7 @@ cargo run -p pet-client
 CHICK_ACCESS_TOKEN=dev:owner-a CHICK_PARTNER_ID=owner-b cargo run -p pet-client
 ```
 
-另一台电脑使用 `CHICK_ACCESS_TOKEN=dev:owner-b CHICK_PARTNER_ID=owner-a`，并把 `CHICK_RELAY_URL` 指向同一个中继即可验证同步。这里只是开发阶段的点对点路由。生产版本由登录站完成互相授权、写入唯一共同宠物关系并下发配对 ID，不能依赖 `dev:` 身份或允许客户端自行填写对方 ID。
+另一台电脑使用 `CHICK_ACCESS_TOKEN=dev:owner-b CHICK_PARTNER_ID=owner-a`，并把 `CHICK_RELAY_URL` 指向同一个中继即可验证同步。聊天第一阶段使用系统原生输入框和消息框，支持在线文本直达；离线消息、聊天记录、表情和图片上传将在数据库与媒体服务接入后完成。这里只是开发阶段的点对点路由。生产版本由登录站完成互相授权、写入唯一共同宠物关系并下发配对 ID，不能依赖 `dev:` 身份或允许客户端自行填写对方 ID。
 
 ## 局域网联机与搜索
 

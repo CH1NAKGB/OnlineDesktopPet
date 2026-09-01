@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
+pub const MAX_TEXT_CHARS: usize = 2_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -86,6 +87,24 @@ pub enum MessageBody {
     },
 }
 
+impl MessageBody {
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::Text { text } => {
+                let chars = text.chars().count();
+                chars > 0 && chars <= MAX_TEXT_CHARS
+            }
+            Self::Emote { code } => !code.is_empty() && code.len() <= 64,
+            Self::Image { url, width, height } => {
+                url.starts_with("https://")
+                    && url.len() <= 2_048
+                    && (1..=4_096).contains(width)
+                    && (1..=4_096).contains(height)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SharedPetAction {
@@ -126,5 +145,27 @@ mod tests {
                 }
             } if recipient_id == "other-owner"
         ));
+    }
+
+    #[test]
+    fn rejects_empty_and_oversized_text_messages() {
+        assert!(
+            !MessageBody::Text {
+                text: String::new()
+            }
+            .is_valid()
+        );
+        assert!(
+            !MessageBody::Text {
+                text: "小".repeat(MAX_TEXT_CHARS + 1)
+            }
+            .is_valid()
+        );
+        assert!(
+            MessageBody::Text {
+                text: "你好".into()
+            }
+            .is_valid()
+        );
     }
 }

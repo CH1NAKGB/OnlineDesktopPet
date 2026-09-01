@@ -15,9 +15,13 @@ serde_json.workspace = true
 shared-protocol = { path = "../shared-protocol" }
 tokio.workspace = true
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tinyfiledialogs = "3.9"
 url = "2.5"
 wgpu = "24.0"
 winit = "0.30"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.19"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-icon = "0.24"

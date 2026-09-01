@@ -8,6 +8,7 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    max_surface_dimension: u32,
     pipeline: wgpu::RenderPipeline,
     time_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -37,6 +38,8 @@ impl Renderer {
                 None,
             )
             .await?;
+        // Remote and software adapters can reject oversized reported window dimensions.
+        let max_surface_dimension = device.limits().max_texture_dimension_2d;
         let capabilities = surface.get_capabilities(&adapter);
         let format = capabilities
             .formats
@@ -59,8 +62,8 @@ impl Renderer {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: Self::surface_dimension(size.width, max_surface_dimension),
+            height: Self::surface_dimension(size.height, max_surface_dimension),
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode,
             view_formats: vec![],
@@ -133,6 +136,7 @@ impl Renderer {
             device,
             queue,
             config,
+            max_surface_dimension,
             pipeline,
             time_buffer,
             bind_group,
@@ -140,9 +144,13 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
-        self.config.width = size.width.max(1);
-        self.config.height = size.height.max(1);
+        self.config.width = Self::surface_dimension(size.width, self.max_surface_dimension);
+        self.config.height = Self::surface_dimension(size.height, self.max_surface_dimension);
         self.surface.configure(&self.device, &self.config);
+    }
+
+    fn surface_dimension(requested: u32, maximum: u32) -> u32 {
+        requested.max(1).min(maximum.max(1))
     }
 
     pub fn render(&self, seconds: f32, petting: f32, skin: f32) -> Result<(), wgpu::SurfaceError> {

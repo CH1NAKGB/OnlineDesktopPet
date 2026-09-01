@@ -133,6 +133,13 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 if user_id.is_none() {
                     continue;
                 }
+                if !body.is_valid() {
+                    let _ = outbound.send(ServerEvent::Error {
+                        code: "invalid_message".into(),
+                        message: "Message body exceeds the allowed limits".into(),
+                    });
+                    continue;
+                }
                 if let Some(peer) = state.sessions.read().await.get(&recipient_id) {
                     let _ = peer.send(ServerEvent::DirectMessage {
                         sender_id: user_id.clone().unwrap(),
