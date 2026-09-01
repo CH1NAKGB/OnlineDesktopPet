@@ -140,6 +140,19 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                     });
                 }
             }
+            ClientEvent::SharedPetAction {
+                recipient_id,
+                action,
+            } => {
+                if let Some(sender_id) = &user_id {
+                    if let Some(peer) = state.sessions.read().await.get(&recipient_id) {
+                        let _ = peer.send(ServerEvent::SharedPetAction {
+                            sender_id: sender_id.clone(),
+                            action,
+                        });
+                    }
+                }
+            }
             ClientEvent::Presence {
                 state: presence,
                 activity,
