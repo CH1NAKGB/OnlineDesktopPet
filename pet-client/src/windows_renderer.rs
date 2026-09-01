@@ -1,5 +1,6 @@
 use std::{ffi::c_void, mem::size_of, ptr, sync::Arc};
 
+use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use anyhow::{Context, ensure};
 use windows_sys::Win32::{
     Foundation::{POINT, SIZE},
@@ -22,6 +23,7 @@ pub struct Renderer {
     pixels: *mut u8,
     width: u32,
     height: u32,
+    font: Option<FontArc>,
 }
 
 impl Renderer {
@@ -60,6 +62,7 @@ impl Renderer {
             pixels: bits.cast(),
             width,
             height,
+            font: load_bubble_font(),
         })
     }
 
@@ -67,18 +70,26 @@ impl Renderer {
         // The pet window is fixed-size; recreating the DIB is unnecessary.
     }
 
-    pub fn render(&self, seconds: f32, petting: f32, skin: f32) -> anyhow::Result<()> {
+    pub fn render(
+        &self,
+        seconds: f32,
+        petting: f32,
+        skin: f32,
+        bubble: Option<&str>,
+    ) -> anyhow::Result<()> {
         let pixels = unsafe {
             std::slice::from_raw_parts_mut(self.pixels, (self.width * self.height * 4) as usize)
         };
         let idle_bob = (seconds * 4.0).sin() * 0.012;
         let happy_bob = (seconds * 12.0).sin().abs() * 0.035 * petting.clamp(0.0, 1.0);
         let (body, head) = palette(skin);
-        for y in 0..self.height {
+        pixels.fill(0);
+        let pet_top = self.height.saturating_sub(144);
+        for y in pet_top..self.height {
             for x in 0..self.width {
                 let point = [
                     (x as f32 + 0.5) / self.width as f32,
-                    (y as f32 + 0.5) / self.height as f32 + idle_bob + happy_bob,
+                    (y.saturating_sub(pet_top) as f32 + 0.5) / 144.0 + idle_bob + happy_bob,
                 ];
                 let mut color = [0.0; 4];
                 layer(&mut color, body, ellipse(point, [0.50, 0.60], [0.31, 0.27]));
@@ -121,6 +132,9 @@ impl Renderer {
                 pixels[offset + 3] = (alpha * 255.0) as u8;
             }
         }
+        if let Some(text) = bubble {
+            draw_bubble(pixels, self.width, self.height, text, self.font.as_ref());
+        }
         let size = SIZE {
             cx: self.width as i32,
             cy: self.height as i32,
@@ -148,6 +162,104 @@ impl Renderer {
         ensure!(updated != 0, "UpdateLayeredWindow failed");
         Ok(())
     }
+}
+
+fn draw_bubble(pixels: &mut [u8], width: u32, height: u32, text: &str, font: Option<&FontArc>) {
+    let bubble_height = height.saturating_sub(144).min(72);
+    if bubble_height < 24 {
+        return;
+    }
+    for y in 2..bubble_height.saturating_sub(7) {
+        for x in 3..width.saturating_sub(3) {
+            let radius = 10.0;
+            let dx = if x < 13 {
+                13 - x
+            } else if x > width - 14 {
+                x - (width - 14)
+            } else {
+                0
+            } as f32;
+            let dy = if y < 12 {
+                12 - y
+            } else if y > bubble_height - 17 {
+                y - (bubble_height - 17)
+            } else {
+                0
+            } as f32;
+            if dx * dx + dy * dy <= radius * radius {
+                put_premultiplied(pixels, width, x, y, [255, 247, 220, 245]);
+            }
+        }
+    }
+    for y in bubble_height.saturating_sub(8)..bubble_height {
+        let half = (bubble_height - y) + 1;
+        let center = width / 2;
+        for x in center.saturating_sub(half)..=(center + half).min(width - 1) {
+            put_premultiplied(pixels, width, x, y, [255, 247, 220, 245]);
+        }
+    }
+    let Some(font) = font else { return };
+    let scale = PxScale::from(15.0);
+    let scaled = font.as_scaled(scale);
+    let line_height = scaled.height() + 2.0;
+    let lines = wrap_text(text, 15);
+    for (line_index, line) in lines.iter().take(2).enumerate() {
+        let mut caret = point(
+            10.0,
+            9.0 + scaled.ascent() + line_index as f32 * line_height,
+        );
+        for character in line.chars() {
+            let glyph_id = scaled.glyph_id(character);
+            let glyph = glyph_id.with_scale_and_position(scale, caret);
+            caret.x += scaled.h_advance(glyph_id);
+            let Some(outlined) = font.outline_glyph(glyph) else {
+                continue;
+            };
+            let bounds = outlined.px_bounds();
+            outlined.draw(|x, y, coverage| {
+                let px = bounds.min.x as i32 + x as i32;
+                let py = bounds.min.y as i32 + y as i32;
+                if px >= 0 && py >= 0 && px < width as i32 && py < bubble_height as i32 {
+                    put_premultiplied(
+                        pixels,
+                        width,
+                        px as u32,
+                        py as u32,
+                        [55, 47, 36, (coverage * 255.0) as u8],
+                    );
+                }
+            });
+        }
+    }
+}
+
+fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
+    let chars: Vec<_> = text.chars().collect();
+    chars
+        .chunks(max_chars)
+        .take(2)
+        .map(|chunk| chunk.iter().collect())
+        .collect()
+}
+
+fn put_premultiplied(pixels: &mut [u8], width: u32, x: u32, y: u32, rgba: [u8; 4]) {
+    let offset = ((y * width + x) * 4) as usize;
+    let alpha = rgba[3] as u16;
+    let inverse = 255 - alpha;
+    let source = [rgba[2], rgba[1], rgba[0]];
+    for channel in 0..3 {
+        pixels[offset + channel] = ((source[channel] as u16 * alpha
+            + pixels[offset + channel] as u16 * inverse)
+            / 255) as u8;
+    }
+    pixels[offset + 3] = (alpha + pixels[offset + 3] as u16 * inverse / 255) as u8;
+}
+
+fn load_bubble_font() -> Option<FontArc> {
+    [r"C:\Windows\Fonts\simhei.ttf", r"C:\Windows\Fonts\msyh.ttf"]
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+        .and_then(|bytes| FontArc::try_from_vec(bytes).ok())
 }
 
 impl Drop for Renderer {

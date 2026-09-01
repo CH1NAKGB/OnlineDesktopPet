@@ -6,8 +6,12 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+ab_glyph = "0.2"
 bytemuck = "1.21"
 futures-util = "0.3"
+egui = "0.31"
+egui-wgpu = "0.31"
+egui-winit = { version = "0.31", default-features = false, features = ["clipboard"] }
 mdns-sd = "0.21"
 pollster = "0.4"
 rand = "0.9"
@@ -16,7 +20,6 @@ serde_json.workspace = true
 shared-protocol = { path = "../shared-protocol" }
 tokio.workspace = true
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
-tinyfiledialogs = "3.9"
 url = "2.5"
 wgpu = "24.0"
 winit = "0.30"

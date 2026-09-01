@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod chat;
+mod chat_window;
 mod config;
 mod frame_pacer;
 mod lan_discovery;
@@ -14,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chat_window::{ChatAction, ChatWindow};
 use config::ClientConfig;
 use frame_pacer::FramePacer;
 #[cfg(not(target_os = "windows"))]
@@ -48,7 +50,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-const PET_SIZE: f64 = 144.0;
+const PET_WIDTH: f64 = 144.0;
+const PET_HEIGHT: f64 = 220.0;
 
 #[derive(Debug)]
 enum NetworkEvent {
@@ -62,6 +65,7 @@ enum NetworkEvent {
     },
     PairingCodeRegistered(String),
     Paired(String),
+    Error(String),
     Disconnected,
 }
 
@@ -379,6 +383,8 @@ struct PetApp {
     partner_id: Option<String>,
     pairing_code: String,
     bubble: Option<(String, Instant)>,
+    chat_window: Option<ChatWindow>,
+    open_chat_on_start: bool,
     latency_ms: Option<u32>,
     #[cfg(target_os = "macos")]
     menu: Option<PetMenu>,
@@ -396,6 +402,7 @@ impl PetApp {
         network_commands: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
         partner_id: Option<String>,
         pairing_code: String,
+        open_chat_on_start: bool,
     ) -> Self {
         Self {
             window: None,
@@ -410,6 +417,8 @@ impl PetApp {
             partner_id,
             pairing_code,
             bubble: None,
+            chat_window: None,
+            open_chat_on_start,
             latency_ms: None,
             #[cfg(target_os = "macos")]
             menu: None,
@@ -453,23 +462,48 @@ impl PetApp {
         }
     }
 
-    fn open_chat(&self) {
-        let sender = self.network_commands.clone();
-        let partner_id = self.partner_id.clone();
-        let pairing_code = self.pairing_code.clone();
-        // Native dialogs are modal. Run them away from Winit so animation and menus stay responsive.
-        std::thread::spawn(move || {
-            if let Some(recipient_id) = partner_id {
-                if let Some(text) = chat::compose(Some(&recipient_id)) {
-                    let _ = sender.send(NetworkCommand::DirectMessage {
+    fn open_chat(&mut self, event_loop: &ActiveEventLoop) {
+        if self.chat_window.is_none() {
+            match pollster::block_on(ChatWindow::new(
+                event_loop,
+                self.pairing_code.clone(),
+                self.partner_id.clone(),
+            )) {
+                Ok(window) => self.chat_window = Some(window),
+                Err(error) => {
+                    eprintln!("chat window error: {error:#}");
+                    return;
+                }
+            }
+        }
+        if let Some(chat_window) = self.chat_window.as_ref() {
+            chat_window.show();
+        }
+    }
+
+    fn handle_chat_actions(&mut self, actions: Vec<ChatAction>) {
+        for action in actions {
+            match action {
+                ChatAction::Pair(code) => {
+                    let _ = self
+                        .network_commands
+                        .send(NetworkCommand::PairWithCode(code));
+                }
+                ChatAction::Send(text) => {
+                    let Some(recipient_id) = self.partner_id.clone() else {
+                        continue;
+                    };
+                    let entry = chat::ChatEntry::new(true, "我".into(), text.clone());
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.push_message(entry);
+                    }
+                    let _ = self.network_commands.send(NetworkCommand::DirectMessage {
                         recipient_id,
                         body: MessageBody::Text { text },
                     });
                 }
-            } else if let Some(code) = chat::prompt_pairing_code(&pairing_code) {
-                let _ = sender.send(NetworkCommand::PairWithCode(code));
             }
-        });
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -484,7 +518,7 @@ impl PetApp {
                 Some(MenuAction::Skin(skin)) => {
                     self.apply_shared_action(SharedPetAction::SetSkin { skin }, true)
                 }
-                Some(MenuAction::Chat) => self.open_chat(),
+                Some(MenuAction::Chat) => self.open_chat(event_loop),
                 Some(MenuAction::Quit) => event_loop.exit(),
                 None => {}
             }
@@ -508,7 +542,7 @@ impl PetApp {
                 Some(TrayAction::Skin(skin)) => {
                     self.apply_shared_action(SharedPetAction::SetSkin { skin }, true)
                 }
-                Some(TrayAction::Chat) => self.open_chat(),
+                Some(TrayAction::Chat) => self.open_chat(event_loop),
                 Some(TrayAction::ShowPet) => {
                     if let Some(window) = self.window.as_ref() {
                         window.set_visible(true);
@@ -529,7 +563,7 @@ impl ApplicationHandler for PetApp {
         }
         let attributes = Window::default_attributes()
             .with_title("Chick Link")
-            .with_inner_size(LogicalSize::new(PET_SIZE, PET_SIZE))
+            .with_inner_size(LogicalSize::new(PET_WIDTH, PET_HEIGHT))
             .with_transparent(true)
             .with_decorations(false)
             .with_resizable(false)
@@ -558,9 +592,30 @@ impl ApplicationHandler for PetApp {
             self.tray = Some(WindowsTray::new(self.partner_id.as_deref()));
             self.windows_menu = Some(WindowsPetMenu::new(&window, self.partner_id.as_deref()));
         }
+        if self.open_chat_on_start {
+            self.open_chat_on_start = false;
+            self.open_chat(event_loop);
+        }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self
+            .chat_window
+            .as_ref()
+            .is_some_and(|chat| chat.id() == id)
+        {
+            let actions = self
+                .chat_window
+                .as_mut()
+                .and_then(|chat| {
+                    chat.handle_event(event_loop, &event)
+                        .map_err(|error| eprintln!("chat render error: {error:#}"))
+                        .ok()
+                })
+                .unwrap_or_default();
+            self.handle_chat_actions(actions);
+            return;
+        }
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -621,13 +676,17 @@ impl ApplicationHandler for PetApp {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(renderer) = self.renderer.as_ref() {
+                if let Some(renderer) = self.renderer.as_mut() {
                     let petting =
                         self.pet_until.is_some_and(|until| until > Instant::now()) as u32 as f32;
                     if let Err(error) = renderer.render(
                         self.started_at.elapsed().as_secs_f32(),
                         petting,
                         skin_to_uniform(self.pet_skin),
+                        self.bubble
+                            .as_ref()
+                            .filter(|(_, until)| *until > Instant::now())
+                            .map(|(text, _)| text.as_str()),
                     ) {
                         eprintln!("render error: {error}");
                     }
@@ -648,14 +707,35 @@ impl ApplicationHandler for PetApp {
                 NetworkEvent::SharedPetAction(action) => self.apply_shared_action(action, false),
                 NetworkEvent::DirectMessage { sender_id, body } => {
                     if let MessageBody::Text { text } = body {
+                        let entry = chat::ChatEntry::new(false, sender_id.clone(), text.clone());
+                        if let Some(chat_window) = self.chat_window.as_mut() {
+                            chat_window.push_message(entry);
+                        } else {
+                            chat::append_history(&entry);
+                        }
                         self.bubble = Some((
                             format!("{sender_id}: {text}"),
                             Instant::now() + Duration::from_secs(8),
                         ));
                     }
                 }
-                NetworkEvent::PairingCodeRegistered(code) => self.pairing_code = code,
-                NetworkEvent::Paired(partner_id) => self.partner_id = Some(partner_id),
+                NetworkEvent::PairingCodeRegistered(code) => {
+                    self.pairing_code = code.clone();
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.set_pairing_code(code);
+                    }
+                }
+                NetworkEvent::Paired(partner_id) => {
+                    self.partner_id = Some(partner_id.clone());
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.set_partner(partner_id);
+                    }
+                }
+                NetworkEvent::Error(message) => {
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.set_status(message);
+                    }
+                }
                 NetworkEvent::Connecting | NetworkEvent::Connected => {}
             }
             #[cfg(target_os = "macos")]
@@ -663,6 +743,14 @@ impl ApplicationHandler for PetApp {
                 menu.update_quality(&self.network_label());
             }
             self.pacer.activate();
+        }
+        if self
+            .bubble
+            .as_ref()
+            .is_some_and(|(_, until)| *until <= Instant::now())
+        {
+            self.bubble = None;
+            window.request_redraw();
         }
         #[cfg(target_os = "macos")]
         self.handle_menu_events(event_loop);
@@ -691,6 +779,10 @@ fn main() -> anyhow::Result<()> {
     let (events_tx, events_rx) = mpsc::channel();
     let partner_id = config.partner_id.clone();
     let pairing_code = config.pairing_code.clone();
+    let open_chat_on_start = std::env::var("CHICK_OPEN_CHAT")
+        .ok()
+        .as_deref()
+        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE"));
     let (commands_tx, commands_rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || network::run(config, events_tx, commands_rx));
     let event_loop = EventLoop::new()?;
@@ -699,6 +791,7 @@ fn main() -> anyhow::Result<()> {
         commands_tx,
         partner_id,
         pairing_code,
+        open_chat_on_start,
     ))?;
     Ok(())
 }
@@ -809,6 +902,9 @@ mod network {
                             }
                             ServerEvent::Paired { partner_id } => {
                                 let _ = events.send(super::NetworkEvent::Paired(partner_id));
+                            }
+                            ServerEvent::Error { message, .. } => {
+                                let _ = events.send(super::NetworkEvent::Error(message));
                             }
                             _ => {}
                         }

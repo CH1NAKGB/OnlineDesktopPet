@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
 use anyhow::Context;
 use winit::{dpi::PhysicalSize, window::Window};
@@ -12,11 +12,15 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     time_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    bubble_context: egui::Context,
+    bubble_renderer: egui_wgpu::Renderer,
+    pixels_per_point: f32,
 }
 
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
+        let pixels_per_point = window.scale_factor() as f32;
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance.create_surface(window)?;
         let adapter = instance
@@ -27,12 +31,14 @@ impl Renderer {
             })
             .await
             .context("no compatible GPU adapter")?;
+        let mut required_limits = wgpu::Limits::downlevel_defaults();
+        required_limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("pet-renderer"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    required_limits,
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                 },
                 None,
@@ -131,6 +137,9 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
+        let bubble_context = egui::Context::default();
+        configure_bubble_font(&bubble_context);
+        let bubble_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
         Ok(Self {
             surface,
             device,
@@ -140,6 +149,9 @@ impl Renderer {
             pipeline,
             time_buffer,
             bind_group,
+            bubble_context,
+            bubble_renderer,
+            pixels_per_point,
         })
     }
 
@@ -153,7 +165,13 @@ impl Renderer {
         requested.max(1).min(maximum.max(1))
     }
 
-    pub fn render(&self, seconds: f32, petting: f32, skin: f32) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(
+        &mut self,
+        seconds: f32,
+        petting: f32,
+        skin: f32,
+        bubble: Option<&str>,
+    ) -> Result<(), wgpu::SurfaceError> {
         self.queue.write_buffer(
             &self.time_buffer,
             0,
@@ -185,10 +203,110 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
+            let pet_size = self.config.width.min(self.config.height);
+            pass.set_viewport(
+                0.0,
+                (self.config.height - pet_size) as f32,
+                pet_size as f32,
+                pet_size as f32,
+                0.0,
+                1.0,
+            );
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit(Some(encoder.finish()));
+        let mut command_buffers = Vec::new();
+        if let Some(text) = bubble {
+            let screen_points = egui::vec2(
+                self.config.width as f32 / self.pixels_per_point,
+                self.config.height as f32 / self.pixels_per_point,
+            );
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_points)),
+                ..Default::default()
+            };
+            let output = self.bubble_context.run(raw_input, |context| {
+                egui::Area::new(egui::Id::new("incoming-bubble"))
+                    .fixed_pos(egui::pos2(4.0, 4.0))
+                    .show(context, |ui| {
+                        egui::Frame::default()
+                            .fill(egui::Color32::from_rgba_premultiplied(255, 247, 220, 245))
+                            .corner_radius(10.0)
+                            .inner_margin(9.0)
+                            .show(ui, |ui| {
+                                ui.set_width(screen_points.x - 26.0);
+                                ui.label(
+                                    egui::RichText::new(text)
+                                        .size(14.0)
+                                        .color(egui::Color32::from_rgb(55, 47, 36)),
+                                );
+                            });
+                    });
+            });
+            let jobs = self
+                .bubble_context
+                .tessellate(output.shapes, output.pixels_per_point);
+            for (id, delta) in &output.textures_delta.set {
+                self.bubble_renderer
+                    .update_texture(&self.device, &self.queue, *id, delta);
+            }
+            let descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [self.config.width, self.config.height],
+                pixels_per_point: self.pixels_per_point,
+            };
+            command_buffers.extend(self.bubble_renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &jobs,
+                &descriptor,
+            ));
+            {
+                let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bubble-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                self.bubble_renderer
+                    .render(&mut pass.forget_lifetime(), &jobs, &descriptor);
+            }
+            for id in &output.textures_delta.free {
+                self.bubble_renderer.free_texture(id);
+            }
+        }
+        self.queue
+            .submit(command_buffers.into_iter().chain([encoder.finish()]));
         output.present();
         Ok(())
     }
+}
+
+fn configure_bubble_font(context: &egui::Context) {
+    let Some(bytes) = [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+    ]
+    .iter()
+    .find_map(|path| fs::read(path).ok()) else {
+        return;
+    };
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "chinese".into(),
+        Arc::new(egui::FontData::from_owned(bytes)),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "chinese".into());
+    context.set_fonts(fonts);
 }

@@ -42,7 +42,7 @@ cargo run -p pet-client
 CHICK_ACCESS_TOKEN=dev:owner-a cargo run -p pet-client
 ```
 
-另一台电脑使用 `CHICK_ACCESS_TOKEN=dev:owner-b`，并把 `CHICK_RELAY_URL` 指向同一个中继即可验证同步。当前中继的配对关系仍保存在内存中，服务重启后需要重新配对。系统输入框已移出桌宠事件循环，因此不会阻塞动画或右键菜单；完整聊天历史窗口、气泡、表情和图片上传仍在后续 UI/媒体阶段。
+另一台电脑使用 `CHICK_ACCESS_TOKEN=dev:owner-b`，并把 `CHICK_RELAY_URL` 指向同一个中继即可验证同步。当前中继的配对关系仍保存在内存中，服务重启后需要重新配对。“配对 / 聊天”会打开独立非透明 egui 窗口，提供本机配对码、历史气泡列表、快捷回复和多行发送区；历史以 JSONL 保存在用户应用数据目录。收到在线文本时还会在桌宠上方显示 8 秒气泡。表情、图片上传和云端离线历史仍属于后续媒体/数据库阶段。
 
 ## 局域网联机与搜索
 
