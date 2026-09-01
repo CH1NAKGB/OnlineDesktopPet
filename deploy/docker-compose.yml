@@ -1,0 +1,31 @@
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: relay-server/Dockerfile
+    environment:
+      BIND_ADDR: ${BIND_ADDR:-0.0.0.0:8080}
+      LAN_DISCOVERY: ${LAN_DISCOVERY:-false}
+    restart: unless-stopped
+    networks: [internal]
+
+  caddy:
+    image: caddy:2.8-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    networks: [internal]
+
+networks:
+  internal:
+
+volumes:
+  caddy_data:
+  caddy_config:
