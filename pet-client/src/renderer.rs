@@ -161,6 +161,10 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
+    pub fn set_scale_factor(&mut self, scale_factor: f64) {
+        self.pixels_per_point = scale_factor.max(1.0) as f32;
+    }
+
     fn surface_dimension(requested: u32, maximum: u32) -> u32 {
         requested.max(1).min(maximum.max(1))
     }
@@ -230,13 +234,18 @@ impl Renderer {
                     .show(context, |ui| {
                         egui::Frame::default()
                             .fill(egui::Color32::from_rgba_premultiplied(255, 247, 220, 245))
+                            .stroke(egui::Stroke::new(
+                                1.0_f32,
+                                egui::Color32::from_rgba_premultiplied(128, 104, 65, 115),
+                            ))
                             .corner_radius(10.0)
-                            .inner_margin(9.0)
+                            .inner_margin(10.0)
                             .show(ui, |ui| {
-                                ui.set_width(screen_points.x - 26.0);
+                                ui.set_width(screen_points.x - 28.0);
                                 ui.label(
                                     egui::RichText::new(text)
-                                        .size(14.0)
+                                        .size(16.0)
+                                        .strong()
                                         .color(egui::Color32::from_rgb(55, 47, 36)),
                                 );
                             });

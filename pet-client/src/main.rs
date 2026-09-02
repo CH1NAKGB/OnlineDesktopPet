@@ -68,6 +68,7 @@ enum NetworkEvent {
     Paired {
         partner_id: String,
         partner_display_name: Option<String>,
+        initiated_by_you: bool,
     },
     ProfileUpdated(String),
     Error(String),
@@ -91,6 +92,7 @@ enum NetworkCommand {
 #[cfg(target_os = "macos")]
 struct PetMenu {
     menu: Menu,
+    owners: MenuItem,
     pet: MenuItem,
     sunshine: MenuItem,
     blueberry: MenuItem,
@@ -137,6 +139,7 @@ impl PetMenu {
         menu.append(&quit).expect("append quit action");
         Self {
             menu,
+            owners,
             pet,
             sunshine,
             blueberry,
@@ -149,6 +152,11 @@ impl PetMenu {
 
     fn update_quality(&self, label: &str) {
         self.quality.set_text(label);
+    }
+
+    fn update_partner(&self, partner: &str) {
+        self.owners
+            .set_text(format!("共同小鸡 · 已配对给 {partner}"));
     }
 
     fn show(&self, window: &Window, position: winit::dpi::PhysicalPosition<f64>) {
@@ -199,20 +207,38 @@ enum MenuAction {
 #[cfg(target_os = "windows")]
 struct WindowsTray {
     _tray: TrayIcon,
+    owners: TrayMenuItem,
     chat: TrayMenuItem,
     show_pet: TrayMenuItem,
+    quality: TrayMenuItem,
     quit: TrayMenuItem,
 }
 
 #[cfg(target_os = "windows")]
 impl WindowsTray {
-    fn new(_partner_id: Option<&str>) -> Self {
+    fn new(partner_id: Option<&str>) -> Self {
         let menu = TrayMenu::new();
+        let owners = TrayMenuItem::new(
+            partner_id
+                .map(|id| format!("共同小鸡 · 已配对给 {id}"))
+                .unwrap_or_else(|| "共同小鸡 · 尚未配对".into()),
+            false,
+            None,
+        );
         let chat = TrayMenuItem::new("配对 / 聊天", true, None);
         let show_pet = TrayMenuItem::new("显示小鸡", true, None);
+        let quality = TrayMenuItem::new("网络：正在连接", false, None);
         let quit = TrayMenuItem::new("退出 Chick Link", true, None);
+        menu.append(&owners).expect("append tray owners");
+        menu.append(&TrayPredefinedMenuItem::separator())
+            .expect("append tray separator");
         menu.append(&chat).expect("append tray chat");
         menu.append(&show_pet).expect("append tray show pet");
+        menu.append(&TrayPredefinedMenuItem::separator())
+            .expect("append tray separator");
+        menu.append(&quality).expect("append tray quality");
+        menu.append(&TrayPredefinedMenuItem::separator())
+            .expect("append tray separator");
         menu.append(&quit).expect("append tray quit");
         let icon = Icon::from_rgba(tray_icon_rgba(), 32, 32).expect("create tray icon");
         let tray = TrayIconBuilder::new()
@@ -223,10 +249,21 @@ impl WindowsTray {
             .expect("create Windows tray icon");
         Self {
             _tray: tray,
+            owners,
             chat,
             show_pet,
+            quality,
             quit,
         }
+    }
+
+    fn update_quality(&self, label: &str) {
+        self.quality.set_text(label);
+    }
+
+    fn update_partner(&self, partner: &str) {
+        self.owners
+            .set_text(format!("共同小鸡 · 已配对给 {partner}"));
     }
 
     fn action_for(&self, id: &TrayMenuId) -> Option<TrayAction> {
@@ -254,11 +291,13 @@ enum TrayAction {
 #[cfg(target_os = "windows")]
 struct WindowsPetMenu {
     menu: TrayMenu,
+    owners: TrayMenuItem,
     pet: TrayMenuItem,
     sunshine: TrayMenuItem,
     blueberry: TrayMenuItem,
     cocoa: TrayMenuItem,
     chat: TrayMenuItem,
+    quality: TrayMenuItem,
     quit: TrayMenuItem,
 }
 
@@ -279,6 +318,7 @@ impl WindowsPetMenu {
         let blueberry = TrayMenuItem::new("蓝莓小鸡", true, None);
         let cocoa = TrayMenuItem::new("可可小鸡", true, None);
         let chat = TrayMenuItem::new("配对 / 聊天", true, None);
+        let quality = TrayMenuItem::new("网络：正在连接", false, None);
         let quit = TrayMenuItem::new("退出 Chick Link", true, None);
         skins.append(&sunshine).expect("append sunshine skin");
         skins.append(&blueberry).expect("append blueberry skin");
@@ -291,19 +331,33 @@ impl WindowsPetMenu {
         menu.append(&chat).expect("append chat action");
         menu.append(&TrayPredefinedMenuItem::separator())
             .expect("append separator");
+        menu.append(&quality).expect("append quality label");
+        menu.append(&TrayPredefinedMenuItem::separator())
+            .expect("append separator");
         menu.append(&quit).expect("append quit action");
         if let Some(hwnd) = windows_hwnd(window) {
             unsafe { menu.attach_menu_subclass_for_hwnd(hwnd) };
         }
         Self {
             menu,
+            owners,
             pet,
             sunshine,
             blueberry,
             cocoa,
             chat,
+            quality,
             quit,
         }
+    }
+
+    fn update_quality(&self, label: &str) {
+        self.quality.set_text(label);
+    }
+
+    fn update_partner(&self, partner: &str) {
+        self.owners
+            .set_text(format!("共同小鸡 · 已配对给 {partner}"));
     }
 
     fn show(&self, window: &Window, position: winit::dpi::PhysicalPosition<f64>) {
@@ -394,6 +448,7 @@ struct PetApp {
     chat_window: Option<ChatWindow>,
     open_chat_on_start: bool,
     latency_ms: Option<u32>,
+    network_connected: bool,
     #[cfg(target_os = "macos")]
     menu: Option<PetMenu>,
     #[cfg(target_os = "windows")]
@@ -431,6 +486,7 @@ impl PetApp {
             chat_window: None,
             open_chat_on_start,
             latency_ms: None,
+            network_connected: false,
             #[cfg(target_os = "macos")]
             menu: None,
             #[cfg(target_os = "windows")]
@@ -463,13 +519,57 @@ impl PetApp {
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn network_label(&self) -> String {
         match self.latency_ms {
             Some(ms) if ms <= 80 => format!("网络：优秀 · {ms} ms"),
             Some(ms) if ms <= 180 => format!("网络：良好 · {ms} ms"),
             Some(ms) => format!("网络：较弱 · {ms} ms"),
+            None if self.network_connected => "网络：已连接 · 测量中".into(),
             None => "网络：正在连接".into(),
+        }
+    }
+
+    fn show_bubble(&mut self, text: impl Into<String>, duration: Duration) {
+        self.bubble = Some((text.into(), Instant::now() + duration));
+        self.pacer.activate();
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
+
+    fn update_partner_labels(&self, partner: &str) {
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = self.menu.as_ref() {
+            menu.update_partner(partner);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(tray) = self.tray.as_ref() {
+                tray.update_partner(partner);
+            }
+            if let Some(menu) = self.windows_menu.as_ref() {
+                menu.update_partner(partner);
+            }
+        }
+    }
+
+    fn update_network_labels(&mut self) {
+        let label = self.network_label();
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = self.menu.as_ref() {
+            menu.update_quality(&label);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(tray) = self.tray.as_ref() {
+                tray.update_quality(&label);
+            }
+            if let Some(menu) = self.windows_menu.as_ref() {
+                menu.update_quality(&label);
+            }
+        }
+        if let Some(chat_window) = self.chat_window.as_mut() {
+            chat_window.set_network_status(label);
         }
     }
 
@@ -480,6 +580,7 @@ impl PetApp {
                 self.pairing_code.clone(),
                 self.partner_id.clone(),
                 self.display_name.clone(),
+                self.network_label(),
             )) {
                 Ok(window) => self.chat_window = Some(window),
                 Err(error) => {
@@ -694,6 +795,12 @@ impl ApplicationHandler for PetApp {
                     menu.show(&window, self.cursor_position);
                 }
             }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_scale_factor(scale_factor);
+                }
+                window.request_redraw();
+            }
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.resize(size);
@@ -726,8 +833,22 @@ impl ApplicationHandler for PetApp {
         };
         while let Ok(event) = self.network_events.try_recv() {
             match event {
-                NetworkEvent::Latency(rtt) => self.latency_ms = Some(rtt.as_millis() as u32),
-                NetworkEvent::Disconnected => self.latency_ms = None,
+                NetworkEvent::Connecting => {
+                    self.network_connected = false;
+                    self.latency_ms = None;
+                }
+                NetworkEvent::Connected => {
+                    self.network_connected = true;
+                    self.latency_ms = None;
+                }
+                NetworkEvent::Latency(rtt) => {
+                    self.network_connected = true;
+                    self.latency_ms = Some(rtt.as_millis() as u32);
+                }
+                NetworkEvent::Disconnected => {
+                    self.network_connected = false;
+                    self.latency_ms = None;
+                }
                 NetworkEvent::SharedPetAction(action) => self.apply_shared_action(action, false),
                 NetworkEvent::DirectMessage {
                     sender_id,
@@ -742,10 +863,7 @@ impl ApplicationHandler for PetApp {
                         } else {
                             chat::append_history(&entry);
                         }
-                        self.bubble = Some((
-                            format!("{sender_name}: {text}"),
-                            Instant::now() + Duration::from_secs(8),
-                        ));
+                        self.show_bubble(format!("{sender_name}: {text}"), Duration::from_secs(8));
                     }
                 }
                 NetworkEvent::PairingCodeRegistered(code) => {
@@ -757,11 +875,34 @@ impl ApplicationHandler for PetApp {
                 NetworkEvent::Paired {
                     partner_id,
                     partner_display_name,
+                    initiated_by_you,
                 } => {
+                    let is_new_pair = self.partner_id.as_deref() != Some(partner_id.as_str());
+                    let partner_label = partner_display_name
+                        .clone()
+                        .unwrap_or_else(|| partner_id.clone());
                     self.partner_id = Some(partner_id.clone());
                     self.partner_display_name = partner_display_name.clone();
+                    self.update_partner_labels(&partner_label);
+                    if is_new_pair {
+                        self.open_chat(event_loop);
+                    }
                     if let Some(chat_window) = self.chat_window.as_mut() {
-                        chat_window.set_partner(partner_id, partner_display_name);
+                        chat_window.set_partner(partner_id, partner_display_name, initiated_by_you);
+                    }
+                    if is_new_pair {
+                        let feedback = if initiated_by_you {
+                            format!("配对成功！已和 {partner_label} 共养小鸡")
+                        } else {
+                            format!("{partner_label} 发起了配对，已自动成功")
+                        };
+                        let entry = chat::ChatEntry::new(false, "系统".into(), feedback.clone());
+                        if let Some(chat_window) = self.chat_window.as_mut() {
+                            chat_window.push_message(entry);
+                        } else {
+                            chat::append_history(&entry);
+                        }
+                        self.show_bubble(feedback, Duration::from_secs(10));
                     }
                 }
                 NetworkEvent::ProfileUpdated(display_name) => {
@@ -775,12 +916,8 @@ impl ApplicationHandler for PetApp {
                         chat_window.set_status(message);
                     }
                 }
-                NetworkEvent::Connecting | NetworkEvent::Connected => {}
             }
-            #[cfg(target_os = "macos")]
-            if let Some(menu) = self.menu.as_ref() {
-                menu.update_quality(&self.network_label());
-            }
+            self.update_network_labels();
             self.pacer.activate();
         }
         if self
@@ -865,15 +1002,20 @@ mod network {
     ) {
         let runtime = tokio::runtime::Runtime::new().expect("network runtime");
         runtime.block_on(async move {
+          loop {
             let relay_url = if config.discover_lan_relay {
-                super::lan_discovery::find_relay(Duration::from_secs(1)).unwrap_or(config.relay_url)
+                super::lan_discovery::find_relay(Duration::from_secs(1))
+                    .unwrap_or_else(|| config.relay_url.clone())
             } else {
-                config.relay_url
+                config.relay_url.clone()
             };
             let _ = events.send(super::NetworkEvent::Connecting);
-            let Ok((mut socket, _)) = connect_to_relay(&relay_url, config.tls_ca_cert_path.as_deref()).await else {
+            let Ok((mut socket, _)) =
+                connect_to_relay(&relay_url, config.tls_ca_cert_path.as_deref()).await
+            else {
                 let _ = events.send(super::NetworkEvent::Disconnected);
-                return;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
             };
             let secure_channel = match config.server_rsa_public_key_path.as_deref() {
                 Some(path) => match begin_application_encryption(&mut socket, path).await {
@@ -883,29 +1025,36 @@ mod network {
                             "无法建立加密连接：{error}"
                         )));
                         let _ = events.send(super::NetworkEvent::Disconnected);
-                        return;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
                     }
                 },
                 None => None,
             };
             let hello = ClientEvent::Hello {
                 protocol_version: PROTOCOL_VERSION,
-                access_token: config.access_token,
-                device_id: config.device_id,
-                display_name: Some(config.display_name),
+                access_token: config.access_token.clone(),
+                device_id: config.device_id.clone(),
+                display_name: Some(config.display_name.clone()),
             };
             let register_code = ClientEvent::RegisterPairingCode {
-                code: config.pairing_code,
+                code: config.pairing_code.clone(),
             };
             let presence = ClientEvent::Presence {
                 state: PresenceState::Online,
                 activity: None,
             };
+            let mut initialized = true;
             for event in [hello, register_code, presence] {
                 if send_client_event(&mut socket, secure_channel.as_ref(), &event).await.is_err() {
                     let _ = events.send(super::NetworkEvent::Disconnected);
-                    return;
+                    initialized = false;
+                    break;
                 }
+            }
+            if !initialized {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
             }
             let _ = events.send(super::NetworkEvent::Connected);
             let mut ping_timer = tokio::time::interval(Duration::from_secs(3));
@@ -970,8 +1119,12 @@ mod network {
                             ServerEvent::PairingCodeRegistered { code } => {
                                 let _ = events.send(super::NetworkEvent::PairingCodeRegistered(code));
                             }
-                            ServerEvent::Paired { partner_id, partner_display_name } => {
-                                let _ = events.send(super::NetworkEvent::Paired { partner_id, partner_display_name });
+                            ServerEvent::Paired { partner_id, partner_display_name, initiated_by_you } => {
+                                let _ = events.send(super::NetworkEvent::Paired {
+                                    partner_id,
+                                    partner_display_name,
+                                    initiated_by_you,
+                                });
                             }
                             ServerEvent::ProfileUpdated { display_name, .. } => {
                                 let _ = events.send(super::NetworkEvent::ProfileUpdated(display_name));
@@ -985,6 +1138,8 @@ mod network {
                 }
             }
             let _ = events.send(super::NetworkEvent::Disconnected);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+          }
         });
     }
 

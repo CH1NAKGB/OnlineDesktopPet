@@ -202,6 +202,15 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 let _ = outbound.send(ServerEvent::Ready {
                     user_id: id.clone(),
                 });
+                if let Some(partner_id) = state.partners.read().await.get(&id).cloned() {
+                    let partner_display_name =
+                        state.display_names.read().await.get(&partner_id).cloned();
+                    let _ = outbound.send(ServerEvent::Paired {
+                        partner_id,
+                        partner_display_name,
+                        initiated_by_you: false,
+                    });
+                }
                 user_id = Some(id);
             }
             ClientEvent::UpdateProfile { display_name } => {
@@ -282,11 +291,13 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 let _ = outbound.send(ServerEvent::Paired {
                     partner_id: partner_id.clone(),
                     partner_display_name: names.get(&partner_id).cloned(),
+                    initiated_by_you: true,
                 });
                 if let Some(peer) = state.sessions.read().await.get(&partner_id) {
                     let _ = peer.send(ServerEvent::Paired {
                         partner_id: id.clone(),
                         partner_display_name: names.get(id).cloned(),
+                        initiated_by_you: false,
                     });
                 }
             }

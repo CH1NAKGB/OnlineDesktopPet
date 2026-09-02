@@ -159,6 +159,9 @@ pub enum ServerEvent {
         partner_id: String,
         #[serde(default)]
         partner_display_name: Option<String>,
+        /// Lets both clients explain whether this device submitted the code.
+        #[serde(default)]
+        initiated_by_you: bool,
     },
     ProfileUpdated {
         user_id: String,
@@ -328,6 +331,22 @@ mod tests {
         );
         assert!(normalize_display_name("").is_none());
         assert!(normalize_display_name(&"x".repeat(MAX_DISPLAY_NAME_CHARS + 1)).is_none());
+    }
+
+    #[test]
+    fn old_paired_events_default_to_remote_initiation() {
+        let event: ServerEvent = serde_json::from_str(
+            r#"{"type":"paired","partner_id":"owner-b","partner_display_name":"小麦"}"#,
+        )
+        .expect("deserialize legacy paired event");
+        assert!(matches!(
+            event,
+            ServerEvent::Paired {
+                partner_id,
+                partner_display_name: Some(name),
+                initiated_by_you: false,
+            } if partner_id == "owner-b" && name == "小麦"
+        ));
     }
 
     #[test]

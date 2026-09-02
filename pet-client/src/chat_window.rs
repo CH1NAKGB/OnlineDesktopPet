@@ -41,6 +41,7 @@ pub struct ChatWindow {
     edit_display_name: String,
     editing_name: bool,
     status: String,
+    network_status: String,
     dark_mode: bool,
     pending_size: Option<winit::dpi::PhysicalSize<u32>>,
     resize_deadline: Option<Instant>,
@@ -52,6 +53,7 @@ impl ChatWindow {
         own_code: String,
         partner_id: Option<String>,
         display_name: String,
+        network_status: String,
     ) -> anyhow::Result<Self> {
         let attributes = Window::default_attributes()
             .with_title("Chick Link Chat")
@@ -132,6 +134,7 @@ impl ChatWindow {
             display_name,
             editing_name: false,
             status: "等待输入对方配对码".into(),
+            network_status,
             dark_mode,
             pending_size: None,
             resize_deadline: None,
@@ -148,11 +151,27 @@ impl ChatWindow {
         self.window.request_redraw();
     }
 
-    pub fn set_partner(&mut self, partner_id: String, partner_display_name: Option<String>) {
+    pub fn set_partner(
+        &mut self,
+        partner_id: String,
+        partner_display_name: Option<String>,
+        initiated_by_you: bool,
+    ) {
         self.partner_id = Some(partner_id);
         self.partner_display_name = partner_display_name;
-        self.status = "已配对并在线".into();
+        self.status = if initiated_by_you {
+            "已配对成功".into()
+        } else {
+            "对方发起配对，已自动成功".into()
+        };
         self.window.request_redraw();
+    }
+
+    pub fn set_network_status(&mut self, status: String) {
+        if self.network_status != status {
+            self.network_status = status;
+            self.window.request_redraw();
+        }
     }
 
     pub fn set_partner_display_name(&mut self, display_name: String) {
@@ -272,6 +291,12 @@ impl ChatWindow {
                                 RichText::new("交换配对码后，两台电脑就会连接起来")
                                     .size(13.0)
                                     .color(colors.muted),
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(&self.network_status)
+                                    .size(12.0)
+                                    .color(colors.accent),
                             );
                             ui.add_space(24.0);
 
@@ -435,7 +460,13 @@ impl ChatWindow {
                                 .inner_margin(egui::Margin::symmetric(10, 5))
                                 .show(ui, |ui| {
                                     ui.label(
-                                        RichText::new("● 在线").size(12.0).color(colors.accent),
+                                        RichText::new(
+                                            self.network_status
+                                                .strip_prefix("网络：")
+                                                .unwrap_or(&self.network_status),
+                                        )
+                                        .size(12.0)
+                                        .color(colors.accent),
                                     );
                                 });
                             if ui
