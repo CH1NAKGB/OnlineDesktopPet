@@ -7,6 +7,14 @@ use std::{
 use anyhow::Context;
 use egui::{Color32, RichText};
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    BringWindowToTop, SW_RESTORE, SetForegroundWindow, ShowWindow,
+};
+#[cfg(target_os = "windows")]
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::{
     dpi::LogicalSize,
     event::WindowEvent,
@@ -40,6 +48,7 @@ pub struct ChatWindow {
     display_name: String,
     edit_display_name: String,
     editing_name: bool,
+    focus_pair_input: bool,
     status: String,
     network_status: String,
     dark_mode: bool,
@@ -133,6 +142,7 @@ impl ChatWindow {
             edit_display_name: display_name.clone(),
             display_name,
             editing_name: false,
+            focus_pair_input: true,
             status: "等待输入对方配对码".into(),
             network_status,
             dark_mode,
@@ -145,9 +155,11 @@ impl ChatWindow {
         self.window.id()
     }
 
-    pub fn show(&self) {
+    pub fn show(&mut self) {
+        self.focus_pair_input = self.partner_id.is_none();
         self.window.set_visible(true);
         self.window.focus_window();
+        activate_windows_chat(&self.window);
         self.window.request_redraw();
     }
 
@@ -159,6 +171,7 @@ impl ChatWindow {
     ) {
         self.partner_id = Some(partner_id);
         self.partner_display_name = partner_display_name;
+        self.focus_pair_input = false;
         self.status = if initiated_by_you {
             "已配对成功".into()
         } else {
@@ -397,6 +410,10 @@ impl ChatWindow {
                                                     .hint_text("例如 7KQ3M9XZ")
                                                     .horizontal_align(egui::Align::Center),
                                             );
+                                            if self.focus_pair_input {
+                                                response.request_focus();
+                                                self.focus_pair_input = false;
+                                            }
                                             self.pair_input.make_ascii_uppercase();
                                             let valid = shared_protocol::is_valid_pairing_code(
                                                 self.pair_input.trim(),
@@ -650,6 +667,26 @@ impl ChatWindow {
         Ok(actions)
     }
 }
+
+#[cfg(target_os = "windows")]
+fn activate_windows_chat(window: &Window) {
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = handle.hwnd.get() as _;
+    unsafe {
+        ShowWindow(hwnd, SW_RESTORE);
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn activate_windows_chat(_window: &Window) {}
 
 fn configure_style(context: &egui::Context, dark_mode: bool) {
     let colors = Palette::new(dark_mode);

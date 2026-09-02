@@ -537,6 +537,14 @@ impl PetApp {
         }
     }
 
+    fn update_frame_rate(&mut self, window: &Window) {
+        self.pacer.set_refresh_rate(
+            window
+                .current_monitor()
+                .and_then(|monitor| monitor.refresh_rate_millihertz()),
+        );
+    }
+
     fn update_partner_labels(&self, partner: &str) {
         #[cfg(target_os = "macos")]
         if let Some(menu) = self.menu.as_ref() {
@@ -589,7 +597,7 @@ impl PetApp {
                 }
             }
         }
-        if let Some(chat_window) = self.chat_window.as_ref() {
+        if let Some(chat_window) = self.chat_window.as_mut() {
             chat_window.show();
         }
     }
@@ -707,6 +715,7 @@ impl ApplicationHandler for PetApp {
         enable_windows_transparency(&window);
         self.renderer =
             Some(pollster::block_on(Renderer::new(window.clone())).expect("create GPU renderer"));
+        self.update_frame_rate(&window);
         self.window = Some(window.clone());
         #[cfg(target_os = "macos")]
         {
@@ -799,8 +808,10 @@ impl ApplicationHandler for PetApp {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.set_scale_factor(scale_factor);
                 }
+                self.update_frame_rate(&window);
                 window.request_redraw();
             }
+            WindowEvent::Moved(_) => self.update_frame_rate(&window),
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.resize(size);
@@ -918,7 +929,6 @@ impl ApplicationHandler for PetApp {
                 }
             }
             self.update_network_labels();
-            self.pacer.activate();
         }
         if self
             .bubble
@@ -935,13 +945,11 @@ impl ApplicationHandler for PetApp {
         self.handle_menu_events(event_loop);
         #[cfg(target_os = "windows")]
         self.handle_tray_events(event_loop);
-        match self.pacer.next_wake() {
-            Some(when) => event_loop.set_control_flow(ControlFlow::WaitUntil(when)),
-            None => {
-                event_loop.set_control_flow(ControlFlow::Poll);
-                window.request_redraw();
-            }
+        let (redraw, next_wake) = self.pacer.schedule();
+        if redraw {
+            window.request_redraw();
         }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next_wake));
     }
 }
 
