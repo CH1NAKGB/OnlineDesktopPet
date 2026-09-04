@@ -1,0 +1,30 @@
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: relay-server/Dockerfile
+    ports:
+      - "${RELAY_PUBLIC_PORT:-18080}:8080"
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      LAN_DISCOVERY: "false"
+      RELAY_REQUIRE_ENCRYPTION: "true"
+      RELAY_RSA_PRIVATE_KEY_PATH: /run/secrets/relay-private.pem
+      RELAY_REQUIRE_PROVISIONED_TOKENS: "true"
+      RELAY_ACCESS_TOKENS_PATH: /run/secrets/access-tokens.json
+    volumes:
+      - ${RELAY_RSA_PRIVATE_KEY_FILE:-./secrets/relay-private.pem}:/run/secrets/relay-private.pem:ro
+      - ${RELAY_ACCESS_TOKENS_FILE:-./secrets/access-tokens.json}:/run/secrets/access-tokens.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 192m
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"

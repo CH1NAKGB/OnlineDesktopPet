@@ -1,5 +1,7 @@
 /target
 /dist
 /.env
+/deploy/.env
+/deploy/secrets/
 *.log
 *.local

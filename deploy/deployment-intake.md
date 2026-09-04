@@ -19,10 +19,10 @@ long-term public deployment.
 5. Current output of `cat /etc/os-release`, `uname -m`, `df -h /`, and `free -h`.
 6. Whether Docker Engine and the Compose plugin are already installed.
 7. Domain/subdomain to use, if any, and confirmation that its A record can point to the ECS IP.
-8. Current Alibaba Cloud security-group inbound rules for TCP 22, 80, 443, and 8080.
+8. Current Alibaba Cloud security-group inbound rules for TCP 22, 80, 443, 8080, and the proposed alternate TCP 18080.
 9. Desired deployment mode:
    - Domain + Caddy + `wss://` (recommended for public use).
-   - Direct IP + RSA/AES application encryption (test/private deployment).
+   - Direct IP + RSA/AES application encryption on TCP 18080 (test/private deployment).
 10. Whether the server may be rebooted or its operating system may be replaced.
 
 ## Do not send in chat
@@ -42,7 +42,7 @@ For the recommended WSS deployment, expose TCP 80 and 443 publicly. Restrict SSH
 current public IP. Do not expose relay port 8080 directly; Caddy reaches it on the internal Docker
 network.
 
-For direct-IP RSA testing, expose TCP 8080 only to the two testers' public IPs where possible.
+For direct-IP RSA testing, expose TCP 18080 only to the two testers' public IPs where possible.
 Distribute `relay-public.pem` through the application package or another trusted channel; never
 download it from the same unauthenticated relay endpoint.
 
@@ -50,6 +50,7 @@ download it from the same unauthenticated relay endpoint.
 
 - `GET /healthz` returns `ok` through the intended public endpoint.
 - A client completes the encrypted handshake and receives `Ready`.
+- Invalid and `dev:<name>` tokens are rejected when provisioned-token mode is enabled.
 - Two clients can register unique pairing codes and pair.
 - Text messages, nickname updates, presence, and shared-pet actions work in both directions.
 - Restarting the container does not lose Caddy certificates or server keys.

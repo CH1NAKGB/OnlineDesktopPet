@@ -126,6 +126,18 @@ cargo run -p pet-client
 
 该方案保护业务内容和防篡改，但静态 RSA 密钥协商不具备 TLS 1.3 的前向保密能力；需要面向公网长期运行时，仍建议使用 `wss://`。`deploy/Caddyfile.no-domain` 和 `deploy/docker-compose.no-domain.yml` 继续可用于需要 TLS 的固定 IP 或纯内网场景。
 
+如果宿主机的 80、443、8080 已被占用，可使用加固后的直连配置，仅映射外部 TCP 18080：
+
+```bash
+./deploy/init-encrypted-direct.sh
+docker compose --env-file deploy/.env \
+  -f deploy/docker-compose.encrypted-direct.yml up -d --build
+```
+
+该配置强制启用 RSA/AES 应用层加密，并从服务器本地的
+`deploy/secrets/access-tokens.json` 加载随机访问令牌；任何缺失密钥、明文连接或
+`dev:<name>` 登录都会被拒绝。密钥目录已从 Git 中排除，初始化脚本也不会覆盖已有密钥。
+
 > 安全提醒：当前 `dev:<name>` 是仅供本地调试的临时身份，不可暴露到公网。生产前需要认证站、JWT 签名校验、好友关系校验、上传 MIME/尺寸限制、速率限制和审计日志。
 
 阿里云 CentOS 7.9 与 x64 NAS 的具体部署边界见 [deploy/centos7.md](deploy/centos7.md)。

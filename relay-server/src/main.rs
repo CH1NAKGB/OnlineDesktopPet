@@ -26,6 +26,7 @@ type Sessions = Arc<RwLock<HashMap<String, Tx>>>;
 #[derive(Clone)]
 struct AppState {
     sessions: Sessions,
+    access_tokens: Option<Arc<HashMap<String, String>>>,
     pairing_codes: Arc<RwLock<HashMap<String, String>>>,
     partners: Arc<RwLock<HashMap<String, String>>>,
     /// Recipient -> requester. A relationship is kept until the recipient accepts.
@@ -39,14 +40,25 @@ struct AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
+    let encryption_private_key = load_encryption_private_key()?;
+    if env_flag("RELAY_REQUIRE_ENCRYPTION") && encryption_private_key.is_none() {
+        anyhow::bail!("RELAY_REQUIRE_ENCRYPTION is set but no RSA private key was configured");
+    }
+    let access_tokens = load_access_tokens()?;
+    if env_flag("RELAY_REQUIRE_PROVISIONED_TOKENS") && access_tokens.is_none() {
+        anyhow::bail!(
+            "RELAY_REQUIRE_PROVISIONED_TOKENS is set but no access-token file was configured"
+        );
+    }
     let state = AppState {
         sessions: Arc::default(),
+        access_tokens,
         pairing_codes: Arc::default(),
         partners: Arc::default(),
         unpair_requests: Arc::default(),
         unpair_notifications: Arc::default(),
         display_names: Arc::default(),
-        encryption_private_key: load_encryption_private_key()?,
+        encryption_private_key,
     };
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -186,11 +198,15 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                     });
                     break;
                 }
-                // Development-only identity. Replace with JWT signature verification from the auth service.
-                let id = access_token
-                    .strip_prefix("dev:")
-                    .unwrap_or("anonymous")
-                    .to_owned();
+                let Some(id) = resolve_user_id(state.access_tokens.as_deref(), &access_token)
+                else {
+                    send_error(
+                        &outbound,
+                        "authentication_failed",
+                        "Access token is invalid",
+                    );
+                    break;
+                };
                 state
                     .sessions
                     .write()
@@ -508,7 +524,13 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
     }
 
     if let Some(id) = user_id {
-        state.sessions.write().await.remove(&id);
+        let mut sessions = state.sessions.write().await;
+        if sessions
+            .get(&id)
+            .is_some_and(|current| current.same_channel(&outbound))
+        {
+            sessions.remove(&id);
+        }
         warn!(user_id = %id, "client disconnected");
     }
     writer.abort();
@@ -528,6 +550,56 @@ fn load_encryption_private_key() -> anyhow::Result<Option<Arc<RsaPrivateKey>>> {
     Ok(Some(Arc::new(private_key)))
 }
 
+fn load_access_tokens() -> anyhow::Result<Option<Arc<HashMap<String, String>>>> {
+    let Some(path) = std::env::var_os("RELAY_ACCESS_TOKENS_PATH") else {
+        return Ok(None);
+    };
+    let json = std::fs::read_to_string(&path)?;
+    let tokens: HashMap<String, String> = serde_json::from_str(&json)
+        .map_err(|error| anyhow::anyhow!("invalid access-token file at {:?}: {error}", path))?;
+    if tokens.is_empty() {
+        anyhow::bail!("access-token file at {:?} must not be empty", path);
+    }
+    for (token, user_id) in &tokens {
+        if !(32..=512).contains(&token.len()) {
+            anyhow::bail!("access tokens must contain 32-512 bytes");
+        }
+        if !is_valid_user_id(user_id) {
+            anyhow::bail!("invalid user id in access-token file: {user_id:?}");
+        }
+    }
+    info!(path = ?path, token_count = tokens.len(), "provisioned access-token authentication enabled");
+    Ok(Some(Arc::new(tokens)))
+}
+
+fn resolve_user_id(
+    access_tokens: Option<&HashMap<String, String>>,
+    access_token: &str,
+) -> Option<String> {
+    match access_tokens {
+        Some(tokens) => tokens.get(access_token).cloned(),
+        None => access_token
+            .strip_prefix("dev:")
+            .filter(|user_id| is_valid_user_id(user_id))
+            .map(str::to_owned),
+    }
+}
+
+fn is_valid_user_id(user_id: &str) -> bool {
+    !user_id.is_empty()
+        && user_id.len() <= 64
+        && user_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .as_deref()
+        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
 fn send_error(outbound: &Tx, code: &str, message: &str) {
     let _ = outbound.send(ServerEvent::Error {
         code: code.into(),
@@ -542,4 +614,30 @@ async fn is_partner(state: &AppState, user_id: &str, recipient_id: &str) -> bool
         .await
         .get(user_id)
         .is_some_and(|partner| partner == recipient_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn development_tokens_are_available_only_without_a_provisioned_map() {
+        assert_eq!(
+            resolve_user_id(None, "dev:owner-a").as_deref(),
+            Some("owner-a")
+        );
+        assert!(resolve_user_id(None, "owner-a").is_none());
+        assert!(resolve_user_id(None, "dev:").is_none());
+        assert!(resolve_user_id(None, "dev:owner/a").is_none());
+    }
+
+    #[test]
+    fn provisioned_tokens_disable_development_identity_fallback() {
+        let tokens = HashMap::from([("a".repeat(64), "owner-a".into())]);
+        assert_eq!(
+            resolve_user_id(Some(&tokens), &"a".repeat(64)).as_deref(),
+            Some("owner-a")
+        );
+        assert!(resolve_user_id(Some(&tokens), "dev:owner-a").is_none());
+    }
 }
