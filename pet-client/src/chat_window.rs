@@ -28,6 +28,16 @@ pub enum ChatAction {
     Pair(String),
     Send(String),
     Rename(String),
+    SetLaunchAtLogin(bool),
+    RequestUnpair,
+    RespondUnpair(bool),
+}
+
+#[derive(Clone)]
+enum UnpairDialog {
+    ConfirmLocal,
+    Waiting,
+    ConfirmRemote(String),
 }
 
 pub struct ChatWindow {
@@ -48,7 +58,10 @@ pub struct ChatWindow {
     display_name: String,
     edit_display_name: String,
     editing_name: bool,
+    startup_enabled: bool,
     focus_pair_input: bool,
+    focus_deadline: Option<Instant>,
+    unpair_dialog: Option<UnpairDialog>,
     status: String,
     network_status: String,
     dark_mode: bool,
@@ -66,8 +79,8 @@ impl ChatWindow {
     ) -> anyhow::Result<Self> {
         let attributes = Window::default_attributes()
             .with_title("Chick Link Chat")
-            .with_inner_size(LogicalSize::new(430.0, 640.0))
-            .with_min_inner_size(LogicalSize::new(360.0, 500.0));
+            .with_inner_size(LogicalSize::new(430.0, 700.0))
+            .with_min_inner_size(LogicalSize::new(360.0, 560.0));
         let window = Arc::new(event_loop.create_window(attributes)?);
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance.create_surface(window.clone())?;
@@ -142,7 +155,10 @@ impl ChatWindow {
             edit_display_name: display_name.clone(),
             display_name,
             editing_name: false,
+            startup_enabled: crate::startup::is_enabled(),
             focus_pair_input: true,
+            focus_deadline: None,
+            unpair_dialog: None,
             status: "等待输入对方配对码".into(),
             network_status,
             dark_mode,
@@ -157,6 +173,7 @@ impl ChatWindow {
 
     pub fn show(&mut self) {
         self.focus_pair_input = self.partner_id.is_none();
+        self.focus_deadline = Some(Instant::now() + Duration::from_millis(90));
         self.window.set_visible(true);
         self.window.focus_window();
         activate_windows_chat(&self.window);
@@ -172,11 +189,41 @@ impl ChatWindow {
         self.partner_id = Some(partner_id);
         self.partner_display_name = partner_display_name;
         self.focus_pair_input = false;
+        self.unpair_dialog = None;
         self.status = if initiated_by_you {
             "已配对成功".into()
         } else {
             "对方发起配对，已自动成功".into()
         };
+        self.window.request_redraw();
+    }
+
+    pub fn set_unpair_pending(&mut self) {
+        self.unpair_dialog = Some(UnpairDialog::Waiting);
+        self.status = "解除申请已发出，等待对方确认".into();
+        self.window.request_redraw();
+    }
+
+    pub fn show_unpair_request(&mut self, requester_name: String) {
+        self.unpair_dialog = Some(UnpairDialog::ConfirmRemote(requester_name));
+        self.status = "对方请求解除配对，需要你的确认".into();
+        self.show();
+    }
+
+    pub fn set_unpair_cancelled(&mut self) {
+        self.unpair_dialog = None;
+        self.status = "解除配对已取消，双方仍在共同养鸡".into();
+        self.window.request_redraw();
+    }
+
+    pub fn set_unpaired(&mut self) {
+        self.partner_id = None;
+        self.partner_display_name = None;
+        self.unpair_dialog = None;
+        self.pair_input.clear();
+        self.status = "双方已确认解除，可以重新配对".into();
+        self.focus_pair_input = true;
+        self.focus_deadline = Some(Instant::now() + Duration::from_millis(90));
         self.window.request_redraw();
     }
 
@@ -197,6 +244,21 @@ impl ChatWindow {
         self.edit_display_name = display_name;
         self.editing_name = false;
         self.status = "昵称已保存".into();
+        self.window.request_redraw();
+    }
+
+    pub fn finish_startup_change(&mut self, enabled: bool, error: Option<String>) {
+        if let Some(error) = error {
+            self.startup_enabled = !enabled;
+            self.status = format!("开机自启设置失败：{error}");
+        } else {
+            self.startup_enabled = enabled;
+            self.status = if enabled {
+                "已开启开机自启".into()
+            } else {
+                "已关闭开机自启".into()
+            };
+        }
         self.window.request_redraw();
     }
 
@@ -236,6 +298,10 @@ impl ChatWindow {
                 configure_style(&self.context, self.dark_mode);
                 self.window.request_redraw();
             }
+            WindowEvent::Focused(true) if self.partner_id.is_none() => {
+                self.focus_pair_input = true;
+                self.window.request_redraw();
+            }
             WindowEvent::RedrawRequested => {
                 if self
                     .resize_deadline
@@ -251,11 +317,16 @@ impl ChatWindow {
         Ok(Vec::new())
     }
 
-    pub fn request_resize_redraw_if_due(&self) {
-        if self
-            .resize_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
+    pub fn process_deferred_actions(&mut self) {
+        let now = Instant::now();
+        if self.resize_deadline.is_some_and(|deadline| now >= deadline) {
+            self.window.request_redraw();
+        }
+        if self.focus_deadline.is_some_and(|deadline| now >= deadline) {
+            self.focus_deadline = None;
+            self.focus_pair_input = self.partner_id.is_none();
+            self.window.focus_window();
+            activate_windows_chat(&self.window);
             self.window.request_redraw();
         }
     }
@@ -443,6 +514,14 @@ impl ChatWindow {
                                 },
                             );
                             ui.add_space(14.0);
+                            let startup_changed = ui
+                                .checkbox(&mut self.startup_enabled, "开机时自动启动 Chick Link")
+                                .changed();
+                            if startup_changed {
+                                actions.push(ChatAction::SetLaunchAtLogin(self.startup_enabled));
+                                self.status = "正在更新开机自启设置...".into();
+                            }
+                            ui.add_space(8.0);
                             ui.label(
                                 RichText::new(&self.status)
                                     .size(12.0)
@@ -471,6 +550,16 @@ impl ChatWindow {
                             );
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new("解除配对")
+                                        .fill(colors.danger_bg)
+                                        .stroke(egui::Stroke::new(1.0_f32, colors.danger)),
+                                )
+                                .clicked()
+                            {
+                                self.unpair_dialog = Some(UnpairDialog::ConfirmLocal);
+                            }
                             egui::Frame::default()
                                 .fill(colors.status_bg)
                                 .corner_radius(12.0)
@@ -486,10 +575,7 @@ impl ChatWindow {
                                         .color(colors.accent),
                                     );
                                 });
-                            if ui
-                                .small_button(format!("我的昵称：{}", self.display_name))
-                                .clicked()
-                            {
+                            if ui.small_button("设置").clicked() {
                                 self.editing_name = !self.editing_name;
                             }
                         });
@@ -524,8 +610,28 @@ impl ChatWindow {
                                         actions.push(ChatAction::Rename(normalized.unwrap()));
                                     }
                                 });
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(6.0);
+                                let startup_changed = ui
+                                    .checkbox(
+                                        &mut self.startup_enabled,
+                                        "开机时自动启动 Chick Link",
+                                    )
+                                    .changed();
+                                if startup_changed {
+                                    actions
+                                        .push(ChatAction::SetLaunchAtLogin(self.startup_enabled));
+                                    self.status = "正在更新开机自启设置...".into();
+                                }
                             });
                     }
+                    ui.add_space(7.0);
+                    ui.label(
+                        RichText::new(&self.status)
+                            .size(12.0)
+                            .color(status_color(&self.status, colors)),
+                    );
                     ui.add_space(12.0);
                     ui.separator();
                     egui::ScrollArea::vertical()
@@ -607,6 +713,129 @@ impl ChatWindow {
                         }
                     });
                 });
+
+            if let Some(dialog) = self.unpair_dialog.clone() {
+                egui::Window::new("解除配对")
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .collapsible(false)
+                    .resizable(false)
+                    .fixed_size(egui::vec2(320.0, 210.0))
+                    .frame(
+                        egui::Frame::window(&ctx.style())
+                            .fill(colors.card)
+                            .stroke(egui::Stroke::new(1.0_f32, colors.border))
+                            .corner_radius(14.0)
+                            .inner_margin(18.0),
+                    )
+                    .show(ctx, |ui| match dialog {
+                        UnpairDialog::ConfirmLocal => {
+                            ui.label(
+                                RichText::new("要申请解除共同小鸡关系吗？")
+                                    .size(16.0)
+                                    .strong()
+                                    .color(colors.text),
+                            );
+                            ui.add_space(7.0);
+                            ui.label(
+                                RichText::new("你确认后不会立即解除，还需要对方再次确认。")
+                                    .size(13.0)
+                                    .color(colors.muted),
+                            );
+                            ui.add_space(16.0);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add_sized(
+                                            [108.0, 36.0],
+                                            egui::Button::new("确认申请")
+                                                .fill(colors.danger_bg)
+                                                .stroke(egui::Stroke::new(1.0_f32, colors.danger)),
+                                        )
+                                        .clicked()
+                                    {
+                                        actions.push(ChatAction::RequestUnpair);
+                                        self.unpair_dialog = Some(UnpairDialog::Waiting);
+                                        self.status = "正在提交解除申请...".into();
+                                    }
+                                    if ui
+                                        .add_sized([82.0, 36.0], egui::Button::new("取消"))
+                                        .clicked()
+                                    {
+                                        self.unpair_dialog = None;
+                                    }
+                                },
+                            );
+                        }
+                        UnpairDialog::Waiting => {
+                            ui.label(
+                                RichText::new("等待对方确认")
+                                    .size(16.0)
+                                    .strong()
+                                    .color(colors.text),
+                            );
+                            ui.add_space(7.0);
+                            ui.label(
+                                RichText::new("当前配对仍然有效；只有对方同意后才会解除。")
+                                    .size(13.0)
+                                    .color(colors.muted),
+                            );
+                            ui.add_space(16.0);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add_sized([82.0, 36.0], egui::Button::new("收起"))
+                                        .clicked()
+                                    {
+                                        self.unpair_dialog = None;
+                                    }
+                                },
+                            );
+                        }
+                        UnpairDialog::ConfirmRemote(requester_name) => {
+                            ui.label(
+                                RichText::new(format!("{requester_name} 请求解除配对"))
+                                    .size(16.0)
+                                    .strong()
+                                    .color(colors.text),
+                            );
+                            ui.add_space(7.0);
+                            ui.label(
+                                RichText::new("请再次确认。拒绝后双方会继续共同养鸡。")
+                                    .size(13.0)
+                                    .color(colors.muted),
+                            );
+                            ui.add_space(16.0);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add_sized(
+                                            [108.0, 36.0],
+                                            egui::Button::new("同意解除")
+                                                .fill(colors.danger_bg)
+                                                .stroke(egui::Stroke::new(1.0_f32, colors.danger)),
+                                        )
+                                        .clicked()
+                                    {
+                                        actions.push(ChatAction::RespondUnpair(true));
+                                        self.unpair_dialog = Some(UnpairDialog::Waiting);
+                                        self.status = "双方已确认，正在解除...".into();
+                                    }
+                                    if ui
+                                        .add_sized([96.0, 36.0], egui::Button::new("暂不解除"))
+                                        .clicked()
+                                    {
+                                        actions.push(ChatAction::RespondUnpair(false));
+                                        self.unpair_dialog = None;
+                                        self.status = "已拒绝解除申请".into();
+                                    }
+                                },
+                            );
+                        }
+                    });
+            }
         });
         self.state
             .handle_platform_output(&self.window, output.platform_output);
@@ -702,11 +931,22 @@ fn configure_style(context: &egui::Context, dark_mode: bool) {
     style.visuals.panel_fill = colors.background;
     style.visuals.extreme_bg_color = colors.input;
     style.visuals.widgets.inactive.bg_fill = colors.button;
+    style.visuals.widgets.inactive.weak_bg_fill = colors.button;
     style.visuals.widgets.inactive.fg_stroke.color = colors.text;
     style.visuals.widgets.active.bg_fill = colors.accent;
+    style.visuals.widgets.active.weak_bg_fill = colors.accent;
     style.visuals.widgets.hovered.bg_fill = colors.accent_hover;
+    style.visuals.widgets.hovered.weak_bg_fill = colors.accent_hover;
     style.visuals.selection.bg_fill = colors.accent.linear_multiply(0.65);
     style.visuals.widgets.noninteractive.fg_stroke.color = colors.text;
+    style.visuals.window_corner_radius = egui::CornerRadius::same(14);
+    style.visuals.menu_corner_radius = egui::CornerRadius::same(10);
+    let widget_corner_radius = egui::CornerRadius::same(10);
+    style.visuals.widgets.noninteractive.corner_radius = widget_corner_radius;
+    style.visuals.widgets.inactive.corner_radius = widget_corner_radius;
+    style.visuals.widgets.hovered.corner_radius = widget_corner_radius;
+    style.visuals.widgets.active.corner_radius = widget_corner_radius;
+    style.visuals.widgets.open.corner_radius = widget_corner_radius;
     context.set_style(style);
 }
 
@@ -721,6 +961,8 @@ struct Palette {
     muted: Color32,
     accent: Color32,
     accent_hover: Color32,
+    danger: Color32,
+    danger_bg: Color32,
     status_bg: Color32,
     outgoing: Color32,
     incoming: Color32,
@@ -739,6 +981,8 @@ impl Palette {
                 muted: Color32::from_rgb(158, 166, 158),
                 accent: Color32::from_rgb(232, 177, 65),
                 accent_hover: Color32::from_rgb(244, 193, 83),
+                danger: Color32::from_rgb(226, 116, 101),
+                danger_bg: Color32::from_rgb(77, 43, 39),
                 status_bg: Color32::from_rgb(35, 53, 41),
                 outgoing: Color32::from_rgb(55, 79, 60),
                 incoming: Color32::from_rgb(48, 51, 47),
@@ -754,6 +998,8 @@ impl Palette {
                 muted: Color32::from_rgb(111, 119, 112),
                 accent: Color32::from_rgb(190, 125, 24),
                 accent_hover: Color32::from_rgb(218, 151, 38),
+                danger: Color32::from_rgb(184, 72, 61),
+                danger_bg: Color32::from_rgb(249, 229, 224),
                 status_bg: Color32::from_rgb(226, 240, 228),
                 outgoing: Color32::from_rgb(214, 237, 211),
                 incoming: Color32::from_rgb(238, 234, 224),
@@ -770,7 +1016,11 @@ fn spaced_code(code: &str) -> String {
 }
 
 fn status_color(status: &str, colors: Palette) -> Color32 {
-    if status.contains("不存在") || status.contains("invalid") || status.contains("already") {
+    if status.contains("不存在")
+        || status.contains("失败")
+        || status.contains("invalid")
+        || status.contains("already")
+    {
         Color32::from_rgb(211, 85, 74)
     } else {
         colors.muted

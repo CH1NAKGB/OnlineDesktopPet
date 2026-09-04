@@ -129,6 +129,10 @@ pub enum ClientEvent {
     PairWithCode {
         code: String,
     },
+    RequestUnpair,
+    RespondUnpair {
+        accept: bool,
+    },
     Presence {
         state: PresenceState,
         /// Sent only when the local owner explicitly enables activity sharing.
@@ -162,6 +166,20 @@ pub enum ServerEvent {
         /// Lets both clients explain whether this device submitted the code.
         #[serde(default)]
         initiated_by_you: bool,
+    },
+    UnpairPending {
+        partner_id: String,
+    },
+    UnpairRequested {
+        requester_id: String,
+        #[serde(default)]
+        requester_display_name: Option<String>,
+    },
+    UnpairCancelled {
+        partner_id: String,
+    },
+    Unpaired {
+        former_partner_id: String,
     },
     ProfileUpdated {
         user_id: String,
@@ -346,6 +364,29 @@ mod tests {
                 partner_display_name: Some(name),
                 initiated_by_you: false,
             } if partner_id == "owner-b" && name == "小麦"
+        ));
+    }
+
+    #[test]
+    fn unpair_confirmation_events_round_trip_over_json() {
+        let request = serde_json::to_string(&ClientEvent::RespondUnpair { accept: true })
+            .expect("serialize unpair response");
+        assert!(matches!(
+            serde_json::from_str::<ClientEvent>(&request).expect("deserialize unpair response"),
+            ClientEvent::RespondUnpair { accept: true }
+        ));
+
+        let pending = ServerEvent::UnpairRequested {
+            requester_id: "owner-a".into(),
+            requester_display_name: Some("小麦".into()),
+        };
+        let json = serde_json::to_string(&pending).expect("serialize unpair request");
+        assert!(matches!(
+            serde_json::from_str::<ServerEvent>(&json).expect("deserialize unpair request"),
+            ServerEvent::UnpairRequested {
+                requester_id,
+                requester_display_name: Some(name),
+            } if requester_id == "owner-a" && name == "小麦"
         ));
     }
 

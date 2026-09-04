@@ -7,6 +7,7 @@ mod frame_pacer;
 mod lan_discovery;
 #[cfg(not(target_os = "windows"))]
 mod renderer;
+mod startup;
 #[cfg(target_os = "windows")]
 mod windows_renderer;
 
@@ -70,6 +71,15 @@ enum NetworkEvent {
         partner_display_name: Option<String>,
         initiated_by_you: bool,
     },
+    UnpairPending,
+    UnpairRequested {
+        requester_id: String,
+        requester_display_name: Option<String>,
+    },
+    UnpairCancelled,
+    Unpaired {
+        former_partner_id: String,
+    },
     ProfileUpdated(String),
     Error(String),
     Disconnected,
@@ -86,6 +96,8 @@ enum NetworkCommand {
         body: MessageBody,
     },
     PairWithCode(String),
+    RequestUnpair,
+    RespondUnpair(bool),
     UpdateProfile(String),
 }
 
@@ -154,9 +166,12 @@ impl PetMenu {
         self.quality.set_text(label);
     }
 
-    fn update_partner(&self, partner: &str) {
-        self.owners
-            .set_text(format!("共同小鸡 · 已配对给 {partner}"));
+    fn set_partner(&self, partner: Option<&str>) {
+        self.owners.set_text(
+            partner
+                .map(|partner| format!("共同小鸡 · 已配对给 {partner}"))
+                .unwrap_or_else(|| "共同小鸡 · 尚未配对".into()),
+        );
     }
 
     fn show(&self, window: &Window, position: winit::dpi::PhysicalPosition<f64>) {
@@ -261,9 +276,12 @@ impl WindowsTray {
         self.quality.set_text(label);
     }
 
-    fn update_partner(&self, partner: &str) {
-        self.owners
-            .set_text(format!("共同小鸡 · 已配对给 {partner}"));
+    fn set_partner(&self, partner: Option<&str>) {
+        self.owners.set_text(
+            partner
+                .map(|partner| format!("共同小鸡 · 已配对给 {partner}"))
+                .unwrap_or_else(|| "共同小鸡 · 尚未配对".into()),
+        );
     }
 
     fn action_for(&self, id: &TrayMenuId) -> Option<TrayAction> {
@@ -355,9 +373,12 @@ impl WindowsPetMenu {
         self.quality.set_text(label);
     }
 
-    fn update_partner(&self, partner: &str) {
-        self.owners
-            .set_text(format!("共同小鸡 · 已配对给 {partner}"));
+    fn set_partner(&self, partner: Option<&str>) {
+        self.owners.set_text(
+            partner
+                .map(|partner| format!("共同小鸡 · 已配对给 {partner}"))
+                .unwrap_or_else(|| "共同小鸡 · 尚未配对".into()),
+        );
     }
 
     fn show(&self, window: &Window, position: winit::dpi::PhysicalPosition<f64>) {
@@ -545,18 +566,18 @@ impl PetApp {
         );
     }
 
-    fn update_partner_labels(&self, partner: &str) {
+    fn update_partner_labels(&self, partner: Option<&str>) {
         #[cfg(target_os = "macos")]
         if let Some(menu) = self.menu.as_ref() {
-            menu.update_partner(partner);
+            menu.set_partner(partner);
         }
         #[cfg(target_os = "windows")]
         {
             if let Some(tray) = self.tray.as_ref() {
-                tray.update_partner(partner);
+                tray.set_partner(partner);
             }
             if let Some(menu) = self.windows_menu.as_ref() {
-                menu.update_partner(partner);
+                menu.set_partner(partner);
             }
         }
     }
@@ -609,6 +630,22 @@ impl PetApp {
                     let _ = self
                         .network_commands
                         .send(NetworkCommand::PairWithCode(code));
+                }
+                ChatAction::RequestUnpair => {
+                    let _ = self.network_commands.send(NetworkCommand::RequestUnpair);
+                }
+                ChatAction::RespondUnpair(accept) => {
+                    let _ = self
+                        .network_commands
+                        .send(NetworkCommand::RespondUnpair(accept));
+                }
+                ChatAction::SetLaunchAtLogin(enabled) => {
+                    let error = startup::set_enabled(enabled)
+                        .err()
+                        .map(|error| error.to_string());
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.finish_startup_change(enabled, error);
+                    }
                 }
                 ChatAction::Send(text) => {
                     let Some(recipient_id) = self.partner_id.clone() else {
@@ -706,6 +743,14 @@ impl ApplicationHandler for PetApp {
             use winit::platform::windows::WindowAttributesExtWindows;
             attributes.with_skip_taskbar(true)
         };
+        let attributes = event_loop
+            .primary_monitor()
+            .map(|monitor| {
+                attributes
+                    .clone()
+                    .with_position(initial_pet_position(&monitor))
+            })
+            .unwrap_or(attributes);
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
@@ -894,7 +939,7 @@ impl ApplicationHandler for PetApp {
                         .unwrap_or_else(|| partner_id.clone());
                     self.partner_id = Some(partner_id.clone());
                     self.partner_display_name = partner_display_name.clone();
-                    self.update_partner_labels(&partner_label);
+                    self.update_partner_labels(Some(&partner_label));
                     if is_new_pair {
                         self.open_chat(event_loop);
                     }
@@ -915,6 +960,53 @@ impl ApplicationHandler for PetApp {
                         }
                         self.show_bubble(feedback, Duration::from_secs(10));
                     }
+                }
+                NetworkEvent::UnpairPending => {
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.set_unpair_pending();
+                    }
+                    self.show_bubble("解除申请已发出，等待对方确认", Duration::from_secs(8));
+                }
+                NetworkEvent::UnpairRequested {
+                    requester_id,
+                    requester_display_name,
+                } => {
+                    let requester_name = requester_display_name.unwrap_or(requester_id);
+                    self.open_chat(event_loop);
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.show_unpair_request(requester_name.clone());
+                    }
+                    self.show_bubble(
+                        format!("{requester_name} 请求解除配对，请确认"),
+                        Duration::from_secs(12),
+                    );
+                }
+                NetworkEvent::UnpairCancelled => {
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.set_unpair_cancelled();
+                    }
+                    self.show_bubble("解除配对已取消", Duration::from_secs(8));
+                }
+                NetworkEvent::Unpaired { former_partner_id } => {
+                    let former_partner = self
+                        .partner_display_name
+                        .clone()
+                        .unwrap_or(former_partner_id);
+                    self.partner_id = None;
+                    self.partner_display_name = None;
+                    self.update_partner_labels(None);
+                    self.open_chat(event_loop);
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.set_unpaired();
+                    }
+                    let feedback = format!("已与 {former_partner} 解除共同小鸡关系");
+                    let entry = chat::ChatEntry::new(false, "系统".into(), feedback.clone());
+                    if let Some(chat_window) = self.chat_window.as_mut() {
+                        chat_window.push_message(entry);
+                    } else {
+                        chat::append_history(&entry);
+                    }
+                    self.show_bubble(feedback, Duration::from_secs(10));
                 }
                 NetworkEvent::ProfileUpdated(display_name) => {
                     self.partner_display_name = Some(display_name.clone());
@@ -938,8 +1030,8 @@ impl ApplicationHandler for PetApp {
             self.bubble = None;
             window.request_redraw();
         }
-        if let Some(chat_window) = self.chat_window.as_ref() {
-            chat_window.request_resize_redraw_if_due();
+        if let Some(chat_window) = self.chat_window.as_mut() {
+            chat_window.process_deferred_actions();
         }
         #[cfg(target_os = "macos")]
         self.handle_menu_events(event_loop);
@@ -951,6 +1043,22 @@ impl ApplicationHandler for PetApp {
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_wake));
     }
+}
+
+fn initial_pet_position(
+    monitor: &winit::monitor::MonitorHandle,
+) -> winit::dpi::PhysicalPosition<i32> {
+    let origin = monitor.position();
+    let screen = monitor.size();
+    let scale = monitor.scale_factor();
+    let pet_width = (PET_WIDTH * scale).round() as i32;
+    let pet_height = (PET_HEIGHT * scale).round() as i32;
+    let right_margin = (32.0 * scale).round() as i32;
+    let bottom_margin = (88.0 * scale).round() as i32;
+    winit::dpi::PhysicalPosition::new(
+        (origin.x + screen.width as i32 - pet_width - right_margin).max(origin.x),
+        (origin.y + screen.height as i32 - pet_height - bottom_margin).max(origin.y),
+    )
 }
 
 fn skin_to_uniform(skin: PetSkin) -> f32 {
@@ -1085,6 +1193,10 @@ mod network {
                                 ClientEvent::DirectMessage { recipient_id, body }
                             }
                             super::NetworkCommand::PairWithCode(code) => ClientEvent::PairWithCode { code },
+                            super::NetworkCommand::RequestUnpair => ClientEvent::RequestUnpair,
+                            super::NetworkCommand::RespondUnpair(accept) => {
+                                ClientEvent::RespondUnpair { accept }
+                            }
                             super::NetworkCommand::UpdateProfile(display_name) => {
                                 ClientEvent::UpdateProfile { display_name }
                             }
@@ -1132,6 +1244,23 @@ mod network {
                                     partner_id,
                                     partner_display_name,
                                     initiated_by_you,
+                                });
+                            }
+                            ServerEvent::UnpairPending { .. } => {
+                                let _ = events.send(super::NetworkEvent::UnpairPending);
+                            }
+                            ServerEvent::UnpairRequested { requester_id, requester_display_name } => {
+                                let _ = events.send(super::NetworkEvent::UnpairRequested {
+                                    requester_id,
+                                    requester_display_name,
+                                });
+                            }
+                            ServerEvent::UnpairCancelled { .. } => {
+                                let _ = events.send(super::NetworkEvent::UnpairCancelled);
+                            }
+                            ServerEvent::Unpaired { former_partner_id } => {
+                                let _ = events.send(super::NetworkEvent::Unpaired {
+                                    former_partner_id,
                                 });
                             }
                             ServerEvent::ProfileUpdated { display_name, .. } => {

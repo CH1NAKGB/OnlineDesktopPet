@@ -28,6 +28,10 @@ struct AppState {
     sessions: Sessions,
     pairing_codes: Arc<RwLock<HashMap<String, String>>>,
     partners: Arc<RwLock<HashMap<String, String>>>,
+    /// Recipient -> requester. A relationship is kept until the recipient accepts.
+    unpair_requests: Arc<RwLock<HashMap<String, String>>>,
+    /// Offline owners receive the completed unpair result on their next connection.
+    unpair_notifications: Arc<RwLock<HashMap<String, String>>>,
     display_names: Arc<RwLock<HashMap<String, String>>>,
     encryption_private_key: Option<Arc<RsaPrivateKey>>,
 }
@@ -39,6 +43,8 @@ async fn main() -> anyhow::Result<()> {
         sessions: Arc::default(),
         pairing_codes: Arc::default(),
         partners: Arc::default(),
+        unpair_requests: Arc::default(),
+        unpair_notifications: Arc::default(),
         display_names: Arc::default(),
         encryption_private_key: load_encryption_private_key()?,
     };
@@ -202,14 +208,36 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 let _ = outbound.send(ServerEvent::Ready {
                     user_id: id.clone(),
                 });
+                if let Some(former_partner_id) =
+                    state.unpair_notifications.write().await.remove(&id)
+                {
+                    let _ = outbound.send(ServerEvent::Unpaired { former_partner_id });
+                    user_id = Some(id);
+                    continue;
+                }
                 if let Some(partner_id) = state.partners.read().await.get(&id).cloned() {
                     let partner_display_name =
                         state.display_names.read().await.get(&partner_id).cloned();
                     let _ = outbound.send(ServerEvent::Paired {
-                        partner_id,
+                        partner_id: partner_id.clone(),
                         partner_display_name,
                         initiated_by_you: false,
                     });
+
+                    let requests = state.unpair_requests.read().await;
+                    if let Some(requester_id) = requests.get(&id).cloned() {
+                        let requester_display_name =
+                            state.display_names.read().await.get(&requester_id).cloned();
+                        let _ = outbound.send(ServerEvent::UnpairRequested {
+                            requester_id,
+                            requester_display_name,
+                        });
+                    } else if requests
+                        .iter()
+                        .any(|(recipient, requester)| requester == &id && recipient == &partner_id)
+                    {
+                        let _ = outbound.send(ServerEvent::UnpairPending { partner_id });
+                    }
                 }
                 user_id = Some(id);
             }
@@ -299,6 +327,104 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                         partner_display_name: names.get(id).cloned(),
                         initiated_by_you: false,
                     });
+                }
+            }
+            ClientEvent::RequestUnpair => {
+                let Some(id) = &user_id else { continue };
+                let Some(partner_id) = state.partners.read().await.get(id).cloned() else {
+                    send_error(&outbound, "not_paired", "No paired partner to disconnect");
+                    continue;
+                };
+                let mut requests = state.unpair_requests.write().await;
+                if requests.get(id) == Some(&partner_id) {
+                    drop(requests);
+                    send_error(
+                        &outbound,
+                        "unpair_response_required",
+                        "Please respond to your partner's disconnect request",
+                    );
+                    continue;
+                }
+                requests.retain(|recipient, requester| {
+                    recipient != id
+                        && requester != id
+                        && recipient != &partner_id
+                        && requester != &partner_id
+                });
+                requests.insert(partner_id.clone(), id.clone());
+                drop(requests);
+
+                let _ = outbound.send(ServerEvent::UnpairPending {
+                    partner_id: partner_id.clone(),
+                });
+                if let Some(peer) = state.sessions.read().await.get(&partner_id) {
+                    let requester_display_name = state.display_names.read().await.get(id).cloned();
+                    let _ = peer.send(ServerEvent::UnpairRequested {
+                        requester_id: id.clone(),
+                        requester_display_name,
+                    });
+                }
+            }
+            ClientEvent::RespondUnpair { accept } => {
+                let Some(id) = &user_id else { continue };
+                let requester_id = state.unpair_requests.write().await.remove(id);
+                let Some(requester_id) = requester_id else {
+                    send_error(
+                        &outbound,
+                        "unpair_request_not_found",
+                        "Disconnect request was not found",
+                    );
+                    continue;
+                };
+                if !is_partner(&state, id, &requester_id).await {
+                    send_error(
+                        &outbound,
+                        "not_paired",
+                        "Disconnect request is no longer valid",
+                    );
+                    continue;
+                }
+
+                if !accept {
+                    let _ = outbound.send(ServerEvent::UnpairCancelled {
+                        partner_id: requester_id.clone(),
+                    });
+                    if let Some(peer) = state.sessions.read().await.get(&requester_id) {
+                        let _ = peer.send(ServerEvent::UnpairCancelled {
+                            partner_id: id.clone(),
+                        });
+                    }
+                    continue;
+                }
+
+                let mut partners = state.partners.write().await;
+                partners.remove(id);
+                partners.remove(&requester_id);
+                drop(partners);
+                state
+                    .unpair_requests
+                    .write()
+                    .await
+                    .retain(|recipient, requester| {
+                        recipient != id
+                            && requester != id
+                            && recipient != &requester_id
+                            && requester != &requester_id
+                    });
+
+                let _ = outbound.send(ServerEvent::Unpaired {
+                    former_partner_id: requester_id.clone(),
+                });
+                if let Some(peer) = state.sessions.read().await.get(&requester_id) {
+                    let _ = peer.send(ServerEvent::Unpaired {
+                        former_partner_id: id.clone(),
+                    });
+                } else {
+                    state
+                        .unpair_notifications
+                        .write()
+                        .await
+                        .insert(requester_id, id.clone());
                 }
             }
             ClientEvent::DirectMessage { recipient_id, body } => {
