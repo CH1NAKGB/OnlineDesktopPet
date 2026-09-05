@@ -2,6 +2,8 @@
 
 ## Recommended topology
 
+Current owner constraints: CentOS 7.9 x64, host ports 80/443/8080 occupied, proposed public port 18080. Use the encrypted-direct configuration and the tested v0.3.3 Linux x64 image for the initial deployment. No actual ECS deployment has been completed yet. See [QUICKSTART.md](QUICKSTART.md) and [offread.md](../offread.md).
+
 - Alibaba Cloud ECS: public WSS entrypoint, Caddy, relay server, authentication API later.
 - NAS: backups and future image/media storage. Do not expose SMB to the public internet.
 - Preferred host OS: Alibaba Cloud Linux 3, Rocky Linux 9, or Ubuntu 24.04 LTS.
@@ -41,6 +43,8 @@ deployment.
 For the recommended WSS deployment, expose TCP 80 and 443 publicly. Restrict SSH to the owner's
 current public IP. Do not expose relay port 8080 directly; Caddy reaches it on the internal Docker
 network.
+
+This is a future alternative for this owner. The existing Caddy Compose template lacks provisioned-token configuration and must be extended before public use; do not stop the owner's existing services to free those ports.
 
 For direct-IP RSA testing, expose TCP 18080 only to the two testers' public IPs where possible.
 Distribute `relay-public.pem` through the application package or another trusted channel; never

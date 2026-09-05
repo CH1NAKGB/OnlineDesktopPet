@@ -15,7 +15,7 @@ sh deploy/relay.sh up
 
 ## 低配置服务器：使用预编译镜像
 
-如果 Release 附带 `ChickLink-relay-linux-x64-v0.3.3.tar.gz`，先下载它与服务端
+v0.3.3 Release 已附带 `ChickLink-relay-linux-x64-v0.3.3.tar.gz`，先下载它与服务端
 源码包，解压源码包后进入目录，运行：
 
 ```sh
@@ -81,5 +81,7 @@ sh deploy/relay.sh stop
 配对关系和离线通知当前保存在服务端内存，容器重建/重启后需要重新配对；
 聊天历史保留在各客户端本地。健康检查只验证服务存活，公网访问还需真实客户端测试。
 
-CentOS 7 的系统兼容边界见 [centos7.md](centos7.md)。本机未安装 Docker 的情况下，
-不能用脚本语法验证替代 Linux 容器实测。
+v0.3.3 镜像已在 GitHub Ubuntu Linux x64 runner 完成构建、启动和 HTTP 健康检查，
+见 [构建记录](https://github.com/CH1NAKGB/OnlineDesktopPet/actions/runs/33964143902)。
+实际阿里云/NAS 尚未部署，CentOS 7 的目标机兼容边界见 [centos7.md](centos7.md)。
+项目整体接手信息见 [offread.md](../offread.md)；脚本 smoke test 的 fake Docker 不等同于此真实容器验证。

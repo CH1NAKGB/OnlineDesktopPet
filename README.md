@@ -2,10 +2,13 @@
 
 一个面向 macOS 与 Windows 的轻量联机桌宠原型。桌宠主窗口使用原生窗口事件循环；中继服务采用 WebSocket，消息协议从第一天开始独立版本化。
 
+当前版本：[v0.3.3](https://github.com/CH1NAKGB/OnlineDesktopPet/releases/tag/v0.3.3)。
+新对话或新开发者先读 [offread.md 接手文档](offread.md)；部署直接看 [快速部署](deploy/QUICKSTART.md)，客户端验收看 [测试说明](packaging/TESTING.md)。
+
 ## 当前结构
 
 ```
-pet-client/       原生透明置顶窗口、拖拽、wgpu 渲染和帧率调度
+pet-client/       原生桌宠、聊天 UI；macOS wgpu / Windows layered-window 渲染
 relay-server/     WebSocket 在线与点对点消息中继
 shared-protocol/  两端共享的序列化事件
 assets/           原创小鸡概念资源与导出要求
@@ -20,17 +23,17 @@ cargo run -p relay-server
 cargo run -p pet-client
 ```
 
-客户端默认连到 `ws://127.0.0.1:8080/ws`，开发身份是 `dev:chick-user`。两个不同客户端使用不同的 `dev:<name>` 值即可互发事件；发布前必须替换为认证站签发并校验的短期 JWT。
+客户端默认回退到 `ws://127.0.0.1:8080/ws`，开发身份是 `dev:chick-user`。两个客户端使用不同的 `dev:<name>` 并配对后即可互发事件。此模式仅用于本地/可信 LAN；公网测试使用强制加密和随机令牌的直连部署。认证站与短期 JWT 尚未实现。
 
 如果改为 `wss://`，客户端默认信任系统证书。没有公网域名时，也可以通过 `CHICK_TLS_CA_CERT_PATH=/path/to/ca-or-cert.pem` 额外信任一份 PEM 证书或私有 CA 链。
 
 ## 帧率策略
 
-- 活跃状态（拖拽、抚摸、收到消息）：请求连续重绘，渲染器将使用与显示器同步的 present mode。
-- 空闲状态：50ms 唤醒一次，避免透明桌宠持续占用 GPU/CPU。
+- 活跃状态（拖拽、抚摸、收到消息）：按当前显示器刷新率调度，范围 30–240Hz；wgpu 使用 AutoVsync，Windows 桌宠走系统 layered-window 合成。
+- 空闲状态：50ms 唤醒一次，约 20FPS，减少透明桌宠的 GPU/CPU 开销。
 - 动画逻辑必须使用时间差，不应把角色速度绑定到 60 或 120 FPS。
 
-桌宠目前以程序化原创小鸡绘制到真实透明窗口，主渲染链路不经过 WebView。下一步会把它替换为带 alpha 的精灵图，并增加逐像素点击穿透。
+桌宠目前以程序化原创小鸡绘制到透明窗口，主渲染链路不经过 WebView。两端共享呼吸、眨眼和抚摸渐变参数。60/120Hz 动画一致性单测不等于所有硬件都能实测跑满；精灵资源包和逐像素命中仍是后续方向。
 
 左键拖动会使用系统原生窗口移动；快速轻点小鸡会触发短暂的开心跳动。按 `Esc` 可退出测试窗口。
 
@@ -81,23 +84,23 @@ cargo run -p pet-client
 
 ## 隐私边界
 
-默认只同步在线、离开、离线。`SharedActivity` 只有在用户在设置页明确启用“分享当前应用”后才允许发送，且只允许应用显示名；不得上传窗口标题、文件路径、命令行参数、屏幕内容或完整进程列表。服务端后续还需要增加好友关系校验，不能向全部在线用户广播状态。
+当前客户端上线发送 Online 且 activity 为 None；协议保留在线/离开/离线状态与 `SharedActivity`，但尚未实现活动应用采集或“分享当前应用”的设置入口。未来实现必须先获得用户明确启用，仅允许应用显示名，不上传窗口标题、文件路径、命令行、屏幕内容或进程列表。服务端已有配对权限检查；完整账号/好友管理仍未实现。本地聊天历史为明文 JSONL。
 
 ## 部署建议
 
-阿里云实例：认证站、API、WebSocket 入口和 TLS 反向代理。NAS：图片对象存储、聊天媒体和备份。客户端只连固定域名，DDNS 仅作为 NAS 的上游地址，避免把动态地址暴露给用户。
+当前适用方案为公网 TCP 18080 的加密中继；阿里云实际部署尚未完成。认证站、媒体存储与 NAS 备份是后续方向，不是现有已部署服务。用户目前不需要同步 NAS。
 
-中继容器的最小部署文件在 `deploy/`。在一台有 Docker 的 Linux 主机上，将 `deploy/.env.example` 复制为 `.env`，填写指向该主机的域名，并从仓库根目录执行：
+以下为旧域名 TLS 参考配置，仅在宿主机 80/443 可用时考虑。它目前没有接入预置令牌表，不能只加 TLS 就作为已加固的公网部署。将 `deploy/.env.example` 复制为 `deploy/.env`，填写域名后可在隔离环境从仓库根目录运行：
 
 ```bash
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
 ```
 
-域名必须先将 80/443 端口解析到主机，Caddy 才能自动申请 TLS 证书。NAS 采用 DDNS 时也可使用这套部署，但需要路由器端口转发和稳定的公网 IPv4/IPv6；没有稳定入站网络时，优先把中继放到阿里云。
+域名 DNS 需指向主机，且 80/443 可入站访问，Caddy 才能完成对应证书申请。用户的这三个常用端口已被占用，当前应使用下面的 18080 方案。
 
 ### 无域名、无 HTTPS 证书的加密通信
 
-支持。将服务端的 RSA 私钥与客户端的 RSA 公钥离线分发后，客户端可以直接使用 `ws://IP:8080/ws`：RSA-OAEP 只用于保护一次性 AES-256-GCM 会话密钥，后续业务事件都以带认证的 AES 密文传输。此模式不需要域名、HTTPS 证书、Caddy 或任何外部 CA。
+服务端保管 RSA 私钥，仅将公钥通过可信渠道分发给客户端后，可以使用 `ws://IP:端口/ws`：RSA-OAEP 用于保护 AES-256-GCM 会话密钥，后续业务事件以认证密文传输。这是客户端到中继的加密，不是两用户之间的端到端加密，服务器能解密消息。以下手动命令仅演示开发模式，公网请使用强制随机令牌的部署入口。
 
 在运行中继的机器生成一对 3072 位密钥：
 
@@ -138,10 +141,10 @@ sh deploy/relay.sh up
 `deploy/secrets/access-tokens.json` 加载随机访问令牌；任何缺失密钥、明文连接或
 `dev:<name>` 登录都会被拒绝。密钥目录已从 Git 中排除，初始化脚本也不会覆盖已有密钥。
 
-> 安全提醒：当前 `dev:<name>` 是仅供本地调试的临时身份，不可暴露到公网。生产前需要认证站、JWT 签名校验、好友关系校验、上传 MIME/尺寸限制、速率限制和审计日志。
+> `dev:<name>` 仅供开发，不可暴露到公网。直连方案已有随机令牌和配对权限检查，但没有完整登录站、令牌生命周期、速率限制、重放保护或媒体上传安全流程。
 
 阿里云 CentOS 7.9 与 x64 NAS 的具体部署边界见 [deploy/centos7.md](deploy/centos7.md)。
 
 ## macOS DMG
 
-`ChickLink-macos-universal.dmg` 同时包含 Apple Silicon 与 Intel 架构。当前测试包使用临时签名而非 Apple Developer ID 签名；首次打开时如被 Gatekeeper 拦截，可在“系统设置 → 隐私与安全性”中选择仍要打开。正式发布前需要 Developer ID 签名和公证。
+Release 的 `ChickLink-macos-universal-v0.3.3.dmg` 包含 Apple Silicon 与 Intel 架构，使用临时签名，未做 Apple 公证。Windows x64 ZIP 也未做代码签名。源码构建与发布步骤见 [接手文档](offread.md) 和 `packaging/release.sh`。

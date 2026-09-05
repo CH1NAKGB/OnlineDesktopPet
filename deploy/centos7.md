@@ -1,6 +1,8 @@
 # CentOS 7.9 Deployment Notes
 
-The relay container is x86_64-compatible and can run on the Alibaba Cloud CentOS 7.9 host or an x64 Synology Docker host. Build the image on the target host, rather than copying a macOS binary.
+The relay image targets Linux x86_64. v0.3.3 was built and health-checked on a GitHub Ubuntu runner; the owner's CentOS 7.9 and Synology hosts still need compatibility testing. Prefer the prebuilt image on low-memory machines; do not copy a macOS executable onto Linux.
+
+Start with [QUICKSTART.md](QUICKSTART.md): import the release image and run `sh deploy/relay.sh start`, or use `sh deploy/relay.sh up` for a source build. Overall project status is in [offread.md](../offread.md).
 
 The distributable `ChickLink-server-docker-source.zip` contains only the Rust workspace files and deployment configuration required for this build. Extract it on the server before running the commands below; generated `target/` files are intentionally excluded.
 
@@ -51,7 +53,9 @@ The direct deployment sets both `RELAY_REQUIRE_ENCRYPTION=true` and
 `RELAY_REQUIRE_PROVISIONED_TOKENS=true`. Missing key files therefore stop the
 container instead of silently falling back to plaintext or development login.
 
-## Domain Relay Host
+## Domain Relay Host (Reference Only)
+
+The older Caddy Compose file does not configure the provisioned-token map. Add real authentication before exposing that variant publicly; TLS alone does not replace authentication. The current user's host ports 80/443/8080 are occupied, so prefer the encrypted direct configuration above.
 
 1. Install a current Docker Engine and Docker Compose plugin using the vendor-supported package source available for the server at deployment time.
 2. Point the intended public hostname's DNS A/AAAA record to the Alibaba Cloud server.
