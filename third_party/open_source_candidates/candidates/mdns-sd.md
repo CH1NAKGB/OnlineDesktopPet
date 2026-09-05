@@ -1,5 +1,7 @@
 # mdns-sd
 
+已收录 v0.21.0 的查询、注册示例及双许可证，见 [源码清单](../SOURCES.md)。独立运行入口见 [使用说明](../examples/README.md)。
+
 - Repo: <https://github.com/keepsimple1/mdns-sd>
 - License: Apache-2.0 OR MIT
 - 技术栈：Rust crate

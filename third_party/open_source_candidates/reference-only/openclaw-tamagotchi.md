@@ -1,7 +1,7 @@
 # openclaw-tamagotchi
 
 - Repo: <https://github.com/katolikov/openclaw-tamagotchi>
-- License: MIT
+- 状态：跨技术栈参考；许可证和美术资源授权待逐项核验，未收录源码或素材。
 - 技术栈：Python + Qt
 
 ## 为什么适合当前项目

@@ -1,0 +1,8 @@
+.git
+target
+dist
+third_party
+deploy/secrets
+**/.env
+**/*.log
+**/.DS_Store

@@ -129,10 +129,10 @@ cargo run -p pet-client
 如果宿主机的 80、443、8080 已被占用，可使用加固后的直连配置，仅映射外部 TCP 18080：
 
 ```bash
-./deploy/init-encrypted-direct.sh
-docker compose --env-file deploy/.env \
-  -f deploy/docker-compose.encrypted-direct.yml up -d --build
+sh deploy/relay.sh up
 ```
+
+首次启动自动准备配置和密钥，并验证健康状态。端口修改、升级、客户端连接和日常命令见 [服务端快速部署](deploy/QUICKSTART.md)。
 
 该配置强制启用 RSA/AES 应用层加密，并从服务器本地的
 `deploy/secrets/access-tokens.json` 加载随机访问令牌；任何缺失密钥、明文连接或

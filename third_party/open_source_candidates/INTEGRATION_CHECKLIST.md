@@ -1,63 +1,26 @@
-# Integration Checklist
+# 接入清单
 
-## P1: 最值得先接
+以下是建议实施顺序，均未接入主程序。优先处理已有同技术栈源码的模块。
 
-### 1. 窗口行为增强
+| 顺序 | 工作 | 目标位置 | 来源 | 完成标准 |
+| --- | --- | --- | --- | --- |
+| 1 | WebSocket 生命周期 | relay-server/src/main.rs | [Axum](candidates/axum-chat-example.md) | 任一读写任务退出后清理另一任务；重连不误删新连接；配对权限不变 |
+| 2 | mDNS 事件与退出处理 | pet-client/src/lan_discovery.rs、relay-server/src/main.rs | [mdns-sd](candidates/mdns-sd.md) | 超时和错误路径释放 daemon；保留公网回退；验证注册、移除和多网卡场景 |
+| 3 | 窗口位置与多屏恢复 | pet-client/src/main.rs、pet-client/src/config.rs | [QimoBar](reference-only/qimobar.md) | 先核验上游实现；移植后验证屏幕拔插、缩放及位置恢复 |
+| 4 | 精灵动画与动作状态 | pet-client/src/renderer.rs、pet-client/src/windows_renderer.rs、assets/ | [桌宠参考](reference-only/openclaw-tamagotchi.md) | 先确认素材授权；macOS/Windows 动画一致；验证帧率和透明边缘 |
 
-- 目标文件：
-  - `pet-client/src/main.rs`
-  - `pet-client/src/config.rs`
-  - `pet-client/src/windows_renderer.rs`
-- 优先借用：
-  - 位置持久化
-  - 点击穿透开关
-  - 多显示器越界修正
-  - 开机自启入口
-- 上游候选：
-  - `usable-now/qimobar.md`
+## 每次接入
 
-### 2. 精灵/状态机切换
+- 从 SOURCES.md 的固定提交取最小必要部分，保留对应许可证。
+- 在来源记录中注明修改文件与改动原因；美术资源单独核验授权。
+- 使用项目协议替换上游演示协议，验证配对隔离、输入校验和加密边界。
+- 独立示例的构建通过只代表编译可用，业务接入仍需要相应测试。
 
-- 目标文件：
-  - `pet-client/src/renderer.rs`
-  - `pet-client/src/windows_renderer.rs`
-  - `assets/`
-- 优先借用：
-  - 精灵图资源格式
-  - 动作状态机
-  - 气泡文本与台词资源
-  - 宠物配置文件
-- 上游候选：
-  - `usable-now/openclaw-tamagotchi.md`
-  - `reference-only/openpet.md`
+## 尚待调研
 
-### 3. Relay 抽象增强
-
-- 目标文件：
-  - `relay-server/src/main.rs`
-  - `shared-protocol/src/lib.rs`
-- 优先借用：
-  - 连接生命周期拆分
-  - 等待中/已配对状态机
-  - 房间或配对通道抽象
-  - 更清晰的错误事件定义
-- 上游候选：
-  - `usable-now/axum-chat-example.md`
-  - `usable-now/rust-websocket-relay.md`
-
-### 4. mDNS 稳定性增强
-
-- 目标文件：
-  - `pet-client/src/lan_discovery.rs`
-  - `relay-server/src/main.rs`
-- 优先借用：
-  - browse/announce 的异常恢复
-  - IPv6 支持评估
-  - 广播属性字段设计
-- 上游候选：
-  - `usable-now/mdns-sd.md`
-
-## 许可证规则
-
-- `MIT` / `Apache-2.0`：可优先考虑直接复用，接入时补第三方声明。
-- `GPL-3.0`：只看架构和资源组织，不直接拷源码到当前仓库。
+| 模块 | 当前资料缺口 |
+| --- | --- |
+| 原生渲染与像素级命中测试 | 尚未收录兼容 wgpu/winit 与 Windows GDI 的实现 |
+| 本地聊天记录、配置和托盘 | 尚未收录可直接替换的模块 |
+| 认证与加密 | 现有聊天室示例不提供本项目所需的安全协议 |
+| 打包和部署 | 尚未收录适配当前发布流程的脚本 |

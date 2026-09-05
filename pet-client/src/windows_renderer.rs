@@ -21,6 +21,7 @@ const PET_LOGICAL_WIDTH: f64 = 144.0;
 const PET_LOGICAL_HEIGHT: f64 = 220.0;
 
 pub struct Renderer {
+    animation: crate::animation::Animation,
     hwnd: isize,
     dc: HDC,
     bitmap: HBITMAP,
@@ -46,6 +47,7 @@ impl Renderer {
         };
         let old_bitmap = unsafe { SelectObject(dc, bitmap) };
         Ok(Self {
+            animation: Default::default(),
             hwnd,
             dc,
             bitmap,
@@ -85,7 +87,7 @@ impl Renderer {
     }
 
     pub fn render(
-        &self,
+        &mut self,
         seconds: f32,
         petting: f32,
         skin: f32,
@@ -94,8 +96,7 @@ impl Renderer {
         let pixels = unsafe {
             std::slice::from_raw_parts_mut(self.pixels, (self.width * self.height * 4) as usize)
         };
-        let idle_bob = (seconds * 4.0).sin() * 0.012;
-        let happy_bob = (seconds * 12.0).sin().abs() * 0.035 * petting.clamp(0.0, 1.0);
+        let pose = self.animation.sample(seconds, petting);
         let (body, head) = palette(skin);
         pixels.fill(0);
         let pet_size = (144.0 * self.scale_factor).round().max(1.0) as u32;
@@ -103,10 +104,10 @@ impl Renderer {
         for y in pet_top..self.height {
             for x in 0..self.width {
                 let point = [
-                    (x as f32 + 0.5) / self.width as f32,
-                    (y.saturating_sub(pet_top) as f32 + 0.5) / pet_size as f32
-                        + idle_bob
-                        + happy_bob,
+                    ((x as f32 + 0.5) / self.width as f32 - 0.5) * pose[1] + 0.5,
+                    ((y.saturating_sub(pet_top) as f32 + 0.5) / pet_size as f32 - 0.87 + pose[0])
+                        / pose[1]
+                        + 0.87,
                 ];
                 let mut color = [0.0; 4];
                 layer(&mut color, body, ellipse(point, [0.50, 0.60], [0.31, 0.27]));
@@ -114,7 +115,7 @@ impl Renderer {
                 layer(
                     &mut color,
                     mix(body, [0.96, 0.67, 0.15, 1.0], 0.35),
-                    ellipse(point, [0.64, 0.66], [0.17, 0.12]),
+                    ellipse(point, [0.64, 0.66 + pose[3]], [0.17, 0.12]),
                 );
                 layer(
                     &mut color,
@@ -129,12 +130,12 @@ impl Renderer {
                 layer(
                     &mut color,
                     [0.18, 0.11, 0.06, 1.0],
-                    ellipse(point, [0.37, 0.42], [0.035, 0.045]),
+                    ellipse(point, [0.37, 0.42], [0.035, 0.045 * pose[2]]),
                 );
                 layer(
                     &mut color,
                     [0.18, 0.11, 0.06, 1.0],
-                    ellipse(point, [0.51, 0.42], [0.035, 0.045]),
+                    ellipse(point, [0.51, 0.42], [0.035, 0.045 * pose[2]]),
                 );
                 layer(
                     &mut color,

@@ -1,8 +1,8 @@
 # rust-websocket-relay
 
 - Repo: <https://github.com/AlexSua/rust-websocket-relay>
-- License: MIT
-- 技术栈：Rust relay server
+- License: 上游 README 标注 MIT；尚未收录固定版本及许可证全文。
+- 技术栈：Rust + Actix，与本项目 Axum 不同。
 
 ## 为什么适合当前项目
 

@@ -1,5 +1,7 @@
 # axum chat example
 
+已收录固定版本源码、页面和 MIT 许可证，见 [源码清单](../SOURCES.md)。独立运行入口见 [使用说明](../examples/README.md)。
+
 - Repo: <https://github.com/tokio-rs/axum/blob/main/examples/chat/src/main.rs>
 - License: MIT
 - 技术栈：Rust + Axum

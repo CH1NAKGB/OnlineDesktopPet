@@ -1,12 +1,12 @@
 # QimoBar
 
 - Repo: <https://github.com/Picrew/QimoBar>
-- License: MIT
+- 状态：跨技术栈参考；许可证全文与具体实现尚待固定版本核验。
 - 技术栈：Tauri 2 + React + Rust
 
 ## 为什么适合当前项目
 
-虽然不是 `winit` 原生栈，但它已经覆盖了桌宠最实用的一组窗口能力：透明无边框、拖拽、位置记忆、点击穿透、常驻顶层、多显示器处理、托盘菜单和自启动。
+上游介绍使用 Tauri 2 + React + Rust。窗口位置、穿透、多屏和自启动是本项目希望调研的方向，具体实现需要逐项核验，Tauri API 不能直接用于 winit。
 
 ## 最值得借用的部分
 

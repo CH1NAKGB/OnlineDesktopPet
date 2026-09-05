@@ -4,6 +4,7 @@ use anyhow::Context;
 use winit::{dpi::PhysicalSize, window::Window};
 
 pub struct Renderer {
+    animation: crate::animation::Animation,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -78,7 +79,7 @@ impl Renderer {
         surface.configure(&device, &config);
         let time_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("animation-time"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -141,6 +142,7 @@ impl Renderer {
         configure_bubble_font(&bubble_context);
         let bubble_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
         Ok(Self {
+            animation: Default::default(),
             surface,
             device,
             queue,
@@ -176,10 +178,13 @@ impl Renderer {
         skin: f32,
         bubble: Option<&str>,
     ) -> Result<(), wgpu::SurfaceError> {
+        let pose = self.animation.sample(seconds, petting);
         self.queue.write_buffer(
             &self.time_buffer,
             0,
-            bytemuck::cast_slice(&[seconds, petting, skin, 0.0]),
+            bytemuck::cast_slice(&[
+                seconds, petting, skin, 0.0, pose[0], pose[1], pose[2], pose[3],
+            ]),
         );
         let output = self.surface.get_current_texture()?;
         let view = output

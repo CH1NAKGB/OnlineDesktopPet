@@ -1,5 +1,6 @@
 services:
   relay:
+    image: chicklink-relay:0.3.3
     build:
       context: ..
       dockerfile: relay-server/Dockerfile
@@ -24,6 +25,12 @@ services:
     pids_limit: 128
     mem_limit: 192m
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "3", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     logging:
       options:
         max-size: 10m
