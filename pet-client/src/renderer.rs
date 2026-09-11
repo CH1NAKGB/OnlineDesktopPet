@@ -234,27 +234,39 @@ impl Renderer {
                 ..Default::default()
             };
             let output = self.bubble_context.run(raw_input, |context| {
-                egui::Area::new(egui::Id::new("incoming-bubble"))
-                    .fixed_pos(egui::pos2(4.0, 4.0))
-                    .show(context, |ui| {
-                        egui::Frame::default()
-                            .fill(egui::Color32::from_rgba_premultiplied(255, 247, 220, 245))
-                            .stroke(egui::Stroke::new(
-                                1.0_f32,
-                                egui::Color32::from_rgba_premultiplied(128, 104, 65, 115),
-                            ))
-                            .corner_radius(10.0)
-                            .inner_margin(10.0)
-                            .show(ui, |ui| {
-                                ui.set_width(screen_points.x - 28.0);
-                                ui.label(
-                                    egui::RichText::new(text)
-                                        .size(16.0)
-                                        .strong()
-                                        .color(egui::Color32::from_rgb(55, 47, 36)),
-                                );
-                            });
-                    });
+                let text_color = egui::Color32::from_rgb(55, 47, 36);
+                let galley = context.fonts(|fonts| {
+                    fonts.layout(
+                        text.to_owned(),
+                        egui::FontId::proportional(16.0),
+                        text_color,
+                        (screen_points.x - 28.0).max(1.0),
+                    )
+                });
+                let size = galley.size() + egui::vec2(20.0, 20.0);
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2((screen_points.x - size.x) / 2.0, 4.0),
+                    size,
+                );
+                let painter = context.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("incoming-bubble"),
+                ));
+                painter.rect_filled(
+                    rect,
+                    10.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 247, 220, 245),
+                );
+                painter.rect_stroke(
+                    rect,
+                    10.0,
+                    egui::Stroke::new(
+                        1.0_f32,
+                        egui::Color32::from_rgba_unmultiplied(128, 104, 65, 115),
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+                painter.galley(rect.min + egui::vec2(10.0, 10.0), galley, text_color);
             });
             let jobs = self
                 .bubble_context

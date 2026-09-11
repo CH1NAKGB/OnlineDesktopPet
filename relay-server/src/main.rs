@@ -12,8 +12,8 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey, traits::PublicKeyParts};
 use shared_protocol::{
-    ClientEvent, ClientFrame, PROTOCOL_VERSION, SecureChannel, ServerEvent, ServerFrame,
-    decrypt_session_key, is_valid_pairing_code,
+    ClientEvent, ClientFrame, PROTOCOL_VERSION, PresenceState, SecureChannel, ServerEvent,
+    ServerFrame, decrypt_session_key, is_valid_pairing_code,
 };
 use tokio::sync::{RwLock, mpsc};
 use tracing::{info, warn};
@@ -167,7 +167,14 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
     });
 
     let mut user_id: Option<String> = None;
-    while let Some(Ok(Message::Text(text))) = stream.next().await {
+    while let Ok(Some(Ok(message))) =
+        tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await
+    {
+        let text = match message {
+            Message::Text(text) => text,
+            Message::Close(_) => break,
+            _ => continue,
+        };
         let event = if let Some(channel) = &secure_channel {
             let Ok(ClientFrame::Encrypted { frame }) = serde_json::from_str(&text) else {
                 send_error(&outbound, "invalid_event", "Encrypted message required");
@@ -191,6 +198,9 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 display_name,
                 ..
             } => {
+                if user_id.is_some() {
+                    break;
+                }
                 if protocol_version != PROTOCOL_VERSION {
                     let _ = outbound.send(ServerEvent::Error {
                         code: "version_mismatch".into(),
@@ -255,6 +265,7 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                         let _ = outbound.send(ServerEvent::UnpairPending { partner_id });
                     }
                 }
+                sync_presence(&state, &id).await;
                 user_id = Some(id);
             }
             ClientEvent::UpdateProfile { display_name } => {
@@ -344,6 +355,7 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                         initiated_by_you: false,
                     });
                 }
+                sync_presence(&state, id).await;
             }
             ClientEvent::RequestUnpair => {
                 let Some(id) = &user_id else { continue };
@@ -524,16 +536,52 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
     }
 
     if let Some(id) = user_id {
+        let partner_id = state.partners.read().await.get(&id).cloned();
         let mut sessions = state.sessions.write().await;
         if sessions
             .get(&id)
             .is_some_and(|current| current.same_channel(&outbound))
         {
             sessions.remove(&id);
+            if let Some(peer) = partner_id
+                .as_ref()
+                .and_then(|partner| sessions.get(partner))
+            {
+                let _ = peer.send(ServerEvent::Presence {
+                    user_id: id.clone(),
+                    state: PresenceState::Offline,
+                    activity: None,
+                });
+            }
         }
         warn!(user_id = %id, "client disconnected");
     }
     writer.abort();
+}
+
+async fn sync_presence(state: &AppState, id: &str) {
+    let Some(partner_id) = state.partners.read().await.get(id).cloned() else {
+        return;
+    };
+    let sessions = state.sessions.read().await;
+    if let Some(me) = sessions.get(id) {
+        let _ = me.send(ServerEvent::Presence {
+            user_id: partner_id.clone(),
+            state: if sessions.contains_key(&partner_id) {
+                PresenceState::Online
+            } else {
+                PresenceState::Offline
+            },
+            activity: None,
+        });
+    }
+    if let Some(peer) = sessions.get(&partner_id) {
+        let _ = peer.send(ServerEvent::Presence {
+            user_id: id.to_owned(),
+            state: PresenceState::Online,
+            activity: None,
+        });
+    }
 }
 
 fn load_encryption_private_key() -> anyhow::Result<Option<Arc<RsaPrivateKey>>> {
@@ -619,6 +667,238 @@ async fn is_partner(state: &AppState, user_id: &str, recipient_id: &str) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared_protocol::{PetSkin, SharedPetAction, encrypt_session_key};
+    use tokio_tungstenite::{connect_async, tungstenite::Message as WireMessage};
+    type TestSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn send(socket: &mut TestSocket, channel: &SecureChannel, event: ClientEvent) {
+        let frame = ClientFrame::Encrypted {
+            frame: channel.encrypt(&event).unwrap(),
+        };
+        socket
+            .send(WireMessage::text(serde_json::to_string(&frame).unwrap()))
+            .await
+            .unwrap();
+    }
+
+    async fn receive(socket: &mut TestSocket, channel: &SecureChannel) -> ServerEvent {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ServerFrame::Encrypted { frame } =
+            serde_json::from_str(message.to_text().unwrap()).unwrap();
+        channel.decrypt(&frame).unwrap()
+    }
+
+    async fn client(
+        url: &str,
+        key: &RsaPrivateKey,
+        token: &str,
+        code: &str,
+    ) -> (TestSocket, SecureChannel) {
+        let (mut socket, _) = connect_async(url).await.unwrap();
+        let (channel, session_key) = SecureChannel::generate();
+        let handshake = ClientFrame::SecureHandshake {
+            encrypted_session_key: encrypt_session_key(&key.to_public_key(), &session_key).unwrap(),
+        };
+        socket
+            .send(WireMessage::text(
+                serde_json::to_string(&handshake).unwrap(),
+            ))
+            .await
+            .unwrap();
+        send(
+            &mut socket,
+            &channel,
+            ClientEvent::Hello {
+                protocol_version: shared_protocol::PROTOCOL_VERSION,
+                access_token: token.into(),
+                device_id: code.into(),
+                display_name: Some(code.into()),
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut socket, &channel).await,
+            ServerEvent::Ready { .. }
+        ));
+        send(
+            &mut socket,
+            &channel,
+            ClientEvent::RegisterPairingCode { code: code.into() },
+        )
+        .await;
+        loop {
+            match receive(&mut socket, &channel).await {
+                ServerEvent::PairingCodeRegistered { .. } => break,
+                ServerEvent::Paired { .. } | ServerEvent::Presence { .. } => {}
+                event => panic!("unexpected registration event: {event:?}"),
+            }
+        }
+        (socket, channel)
+    }
+
+    #[tokio::test]
+    async fn encrypted_pet_and_message_sync_is_bidirectional_without_echo() {
+        let key = Arc::new(RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap());
+        let token_a = "a".repeat(64);
+        let token_b = "b".repeat(64);
+        let state = AppState {
+            sessions: Arc::default(),
+            pairing_codes: Arc::default(),
+            partners: Arc::default(),
+            unpair_requests: Arc::default(),
+            unpair_notifications: Arc::default(),
+            display_names: Arc::default(),
+            encryption_private_key: Some(key.clone()),
+            access_tokens: Some(Arc::new(HashMap::from([
+                (token_a.clone(), "a".into()),
+                (token_b.clone(), "b".into()),
+            ]))),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+        let router = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(state);
+        let server = tokio::spawn(async {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let (mut a, ca) = client(&url, &key, &token_a, "7KQ3M9XZ").await;
+        let (mut b, cb) = client(&url, &key, &token_b, "8KQ3M9XZ").await;
+        send(
+            &mut a,
+            &ca,
+            ClientEvent::SharedPetAction {
+                recipient_id: "b".into(),
+                action: SharedPetAction::Pet,
+            },
+        )
+        .await;
+        assert!(
+            matches!(receive(&mut a, &ca).await, ServerEvent::Error { code, .. } if code == "not_paired")
+        );
+        send(
+            &mut a,
+            &ca,
+            ClientEvent::PairWithCode {
+                code: "8KQ3M9XZ".into(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut a, &ca).await,
+            ServerEvent::Paired { .. }
+        ));
+        assert!(matches!(
+            receive(&mut b, &cb).await,
+            ServerEvent::Paired { .. }
+        ));
+        assert!(matches!(receive(&mut a, &ca).await,
+            ServerEvent::Presence { user_id, state: PresenceState::Online, .. } if user_id == "b"));
+        assert!(matches!(receive(&mut b, &cb).await,
+            ServerEvent::Presence { user_id, state: PresenceState::Online, .. } if user_id == "a"));
+        send(
+            &mut a,
+            &ca,
+            ClientEvent::SharedPetAction {
+                recipient_id: "b".into(),
+                action: SharedPetAction::Pet,
+            },
+        )
+        .await;
+        assert!(
+            matches!(receive(&mut b, &cb).await, ServerEvent::SharedPetAction { sender_id, action: SharedPetAction::Pet } if sender_id == "a")
+        );
+        // A pong must be the next event: the relay must not echo A's own pat.
+        send(&mut a, &ca, ClientEvent::Ping).await;
+        assert!(matches!(receive(&mut a, &ca).await, ServerEvent::Pong));
+        send(
+            &mut b,
+            &cb,
+            ClientEvent::SharedPetAction {
+                recipient_id: "a".into(),
+                action: SharedPetAction::SetSkin {
+                    skin: PetSkin::Blueberry,
+                },
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut a, &ca).await,
+            ServerEvent::SharedPetAction {
+                action: SharedPetAction::SetSkin {
+                    skin: PetSkin::Blueberry
+                },
+                ..
+            }
+        ));
+        send(
+            &mut b,
+            &cb,
+            ClientEvent::DirectMessage {
+                recipient_id: "a".into(),
+                body: shared_protocol::MessageBody::Text {
+                    text: "hello".into(),
+                },
+            },
+        )
+        .await;
+        assert!(
+            matches!(receive(&mut a, &ca).await, ServerEvent::DirectMessage { sender_id, .. } if sender_id == "b")
+        );
+        send(
+            &mut b,
+            &cb,
+            ClientEvent::SharedPetAction {
+                recipient_id: "a".into(),
+                action: SharedPetAction::Pet,
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut a, &ca).await,
+            ServerEvent::SharedPetAction {
+                action: SharedPetAction::Pet,
+                ..
+            }
+        ));
+        a.close(None).await.unwrap();
+        assert!(matches!(receive(&mut b, &cb).await,
+            ServerEvent::Presence { user_id, state: PresenceState::Offline, .. } if user_id == "a"));
+        let (mut a, _ca) = client(&url, &key, &token_a, "7KQ3M9XZ").await;
+        assert!(matches!(receive(&mut b, &cb).await,
+            ServerEvent::Presence { user_id, state: PresenceState::Online, .. } if user_id == "a"));
+        // A remains connected but stops heartbeats; B must stay online and learn A timed out.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(21);
+        loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "missing idle disconnect notification"
+            );
+            send(&mut b, &cb, ClientEvent::Ping).await;
+            match receive(&mut b, &cb).await {
+                ServerEvent::Presence {
+                    user_id,
+                    state: PresenceState::Offline,
+                    ..
+                } => {
+                    assert_eq!(user_id, "a");
+                    break;
+                }
+                ServerEvent::Pong => {}
+                event => panic!("unexpected heartbeat event: {event:?}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+        let _ = a.close(None).await;
+        b.close(None).await.unwrap();
+        server.abort();
+    }
 
     #[test]
     fn development_tokens_are_available_only_without_a_provisioned_map() {

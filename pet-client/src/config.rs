@@ -2,6 +2,111 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectionSettings {
+    relay_url: String,
+    access_token: String,
+    #[serde(default)]
+    discover_lan_relay: bool,
+    #[serde(default)]
+    server_rsa_public_key_path: Option<PathBuf>,
+    #[serde(default)]
+    tls_ca_cert_path: Option<PathBuf>,
+}
+
+impl ClientConfig {
+    pub fn load() -> anyhow::Result<Self> {
+        let explicit = std::env::var_os("CHICK_CONFIG_PATH").map(PathBuf::from);
+        let portable = std::env::current_exe()?
+            .parent()
+            .map(|path| path.join("chicklink-connection.json"));
+        let path = explicit
+            .clone()
+            .or_else(|| portable.filter(|path| path.is_file()))
+            .or_else(|| {
+                app_data_root()
+                    .map(|root| root.join("connection.json"))
+                    .filter(|path| path.is_file())
+            });
+        let mut config = Self::default();
+        if let Some(path) = path {
+            let data = fs::read_to_string(&path)
+                .map_err(|_| anyhow::anyhow!("无法读取连接配置：{}", path.display()))?;
+            // Do not include the original parser error: it may contain a secret token value.
+            let settings: ConnectionSettings = serde_json::from_str(&data).map_err(|_| {
+                anyhow::anyhow!("连接配置 JSON 无效，请检查字段和格式：{}", path.display())
+            })?;
+            validate_connection(&settings)?;
+            if std::env::var_os("CHICK_RELAY_URL").is_none() {
+                config.relay_url = settings.relay_url;
+            }
+            if std::env::var_os("CHICK_ACCESS_TOKEN").is_none() {
+                config.access_token = settings.access_token;
+            }
+            config.discover_lan_relay = settings.discover_lan_relay;
+            let base = path.parent().unwrap_or(std::path::Path::new("."));
+            if std::env::var_os("CHICK_SERVER_RSA_PUBLIC_KEY_PATH").is_none() {
+                config.server_rsa_public_key_path = settings
+                    .server_rsa_public_key_path
+                    .map(|path| base.join(path));
+            }
+            if std::env::var_os("CHICK_TLS_CA_CERT_PATH").is_none() {
+                config.tls_ca_cert_path = settings.tls_ca_cert_path.map(|path| base.join(path));
+            }
+        }
+        if let Ok(value) = std::env::var("CHICK_DISCOVER_LAN") {
+            config.discover_lan_relay = match value.as_str() {
+                "1" | "true" => true,
+                "0" | "false" => false,
+                _ => anyhow::bail!("CHICK_DISCOVER_LAN 只能为 true/false 或 1/0"),
+            };
+        }
+        for path in [&config.server_rsa_public_key_path, &config.tls_ca_cert_path]
+            .into_iter()
+            .flatten()
+        {
+            anyhow::ensure!(
+                path.is_file(),
+                "无法找到连接所需的公钥或证书：{}",
+                path.display()
+            );
+        }
+        Ok(config)
+    }
+}
+
+fn validate_connection(settings: &ConnectionSettings) -> anyhow::Result<()> {
+    let url = url::Url::parse(&settings.relay_url).map_err(|_| anyhow::anyhow!("中继地址无效"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "ws" | "wss")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none(),
+        "中继地址必须为 ws:// 或 wss://，且不能包含登录凭据"
+    );
+    anyhow::ensure!(!settings.access_token.trim().is_empty(), "个人令牌不能为空");
+    Ok(())
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    #[test]
+    fn portable_settings_validate_address_and_default_to_explicit_server() {
+        let mut settings: ConnectionSettings = serde_json::from_str(
+            r#"{"relay_url":"wss://pet.narendra.cn:18443/ws","access_token":"test"}"#,
+        )
+        .unwrap();
+        assert!(!settings.discover_lan_relay);
+        assert!(validate_connection(&settings).is_ok());
+        settings.relay_url = "https://pet.narendra.cn".into();
+        assert!(validate_connection(&settings).is_err());
+        settings.relay_url = "ws://user:secret@localhost/ws".into();
+        assert!(validate_connection(&settings).is_err());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
     pub relay_url: String,
@@ -56,6 +161,21 @@ pub fn save_display_name(name: &str) -> Option<String> {
     }
     fs::write(path, &name).ok()?;
     Some(name)
+}
+
+pub fn sounds_enabled() -> bool {
+    app_data_root()
+        .and_then(|root| fs::read_to_string(root.join("sounds-enabled.txt")).ok())
+        .is_none_or(|value| value.trim() != "false")
+}
+
+pub fn save_sounds_enabled(enabled: bool) -> std::io::Result<()> {
+    let root = app_data_root().ok_or_else(|| std::io::Error::other("无法确定设置目录"))?;
+    fs::create_dir_all(&root)?;
+    fs::write(
+        root.join("sounds-enabled.txt"),
+        if enabled { "true" } else { "false" },
+    )
 }
 
 fn load_display_name() -> Option<String> {

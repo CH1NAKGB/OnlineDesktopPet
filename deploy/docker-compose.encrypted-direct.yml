@@ -5,7 +5,7 @@ services:
       context: ..
       dockerfile: relay-server/Dockerfile
     ports:
-      - "${RELAY_PUBLIC_PORT:-18080}:8080"
+      - "${RELAY_BIND_IP:-0.0.0.0}:${RELAY_PUBLIC_PORT:-18080}:8080"
     environment:
       BIND_ADDR: 0.0.0.0:8080
       LAN_DISCOVERY: "false"

@@ -29,6 +29,7 @@ pub enum ChatAction {
     Send(String),
     Rename(String),
     SetLaunchAtLogin(bool),
+    SetSoundsEnabled(bool),
     RequestUnpair,
     RespondUnpair(bool),
 }
@@ -59,11 +60,13 @@ pub struct ChatWindow {
     edit_display_name: String,
     editing_name: bool,
     startup_enabled: bool,
+    sounds_enabled: bool,
     focus_pair_input: bool,
     focus_deadline: Option<Instant>,
     unpair_dialog: Option<UnpairDialog>,
     status: String,
     network_status: String,
+    partner_status: String,
     dark_mode: bool,
     pending_size: Option<winit::dpi::PhysicalSize<u32>>,
     resize_deadline: Option<Instant>,
@@ -156,11 +159,13 @@ impl ChatWindow {
             display_name,
             editing_name: false,
             startup_enabled: crate::startup::is_enabled(),
+            sounds_enabled: crate::config::sounds_enabled(),
             focus_pair_input: true,
             focus_deadline: None,
             unpair_dialog: None,
             status: "等待输入对方配对码".into(),
             network_status,
+            partner_status: "状态未知".into(),
             dark_mode,
             pending_size: None,
             resize_deadline: None,
@@ -234,6 +239,13 @@ impl ChatWindow {
         }
     }
 
+    pub fn set_partner_status(&mut self, status: &str) {
+        if self.partner_status != status {
+            self.partner_status = status.into();
+            self.window.request_redraw();
+        }
+    }
+
     pub fn set_partner_display_name(&mut self, display_name: String) {
         self.partner_display_name = Some(display_name);
         self.window.request_redraw();
@@ -264,6 +276,21 @@ impl ChatWindow {
 
     pub fn set_pairing_code(&mut self, code: String) {
         self.own_code = code;
+        self.window.request_redraw();
+    }
+
+    pub fn finish_sound_change(&mut self, enabled: bool, error: Option<String>) {
+        self.sounds_enabled = enabled;
+        self.status = error.map_or_else(
+            || {
+                if enabled {
+                    "柔和提示音已开启".into()
+                } else {
+                    "提示音已静音".into()
+                }
+            },
+            |error| format!("无法保存音效设置：{error}"),
+        );
         self.window.request_redraw();
     }
 
@@ -545,6 +572,7 @@ impl ChatWindow {
                                         self.status = "正在更新开机自启设置...".into();
                                     }
                                     ui.add_space(8.0);
+                                    sound_controls(ui, &mut self.sounds_enabled, &mut actions);
                                     ui.label(
                                         RichText::new(&self.status)
                                             .size(12.0)
@@ -598,6 +626,15 @@ impl ChatWindow {
                         });
                     });
                     ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("对方：{}", self.partner_status))
+                            .size(13.0)
+                            .color(if self.partner_status == "在线" {
+                                colors.text
+                            } else {
+                                colors.muted
+                            }),
+                    );
                     egui::Frame::default()
                         .fill(colors.status_bg)
                         .corner_radius(12.0)
@@ -657,6 +694,7 @@ impl ChatWindow {
                                         .push(ChatAction::SetLaunchAtLogin(self.startup_enabled));
                                     self.status = "正在更新开机自启设置...".into();
                                 }
+                                sound_controls(ui, &mut self.sounds_enabled, &mut actions);
                             });
                     }
                     ui.add_space(7.0);
@@ -989,10 +1027,53 @@ mod theme_tests {
             });
         }
     }
+
+    #[test]
+    fn interactive_labels_keep_readable_contrast_in_both_themes() {
+        fn luminance(color: Color32) -> f32 {
+            let linear = |channel: u8| {
+                let value = f32::from(channel) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r()) + 0.7152 * linear(color.g()) + 0.0722 * linear(color.b())
+        }
+        let context = egui::Context::default();
+        for dark in [false, true, false] {
+            configure_style(&context, dark);
+            let colors = Palette::new(dark);
+            let style = context.style();
+            let widgets = &style.visuals.widgets;
+            for widget in [
+                &widgets.inactive,
+                &widgets.hovered,
+                &widgets.active,
+                &widgets.open,
+            ] {
+                assert_eq!(widget.fg_stroke.color, colors.text);
+                for background in [colors.background, colors.card, widget.bg_fill] {
+                    let foreground = luminance(widget.fg_stroke.color);
+                    let background = luminance(background);
+                    let contrast =
+                        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05);
+                    assert!(contrast >= 4.5, "dark={dark}, contrast={contrast}");
+                }
+            }
+        }
+    }
 }
 
 fn rounded_button(text: impl Into<egui::WidgetText>) -> egui::Button<'static> {
     egui::Button::new(text).corner_radius(egui::CornerRadius::same(10))
+}
+
+fn sound_controls(ui: &mut egui::Ui, enabled: &mut bool, actions: &mut Vec<ChatAction>) {
+    if ui.checkbox(enabled, "柔和提示音 · 拍拍和新消息").changed() {
+        actions.push(ChatAction::SetSoundsEnabled(*enabled));
+    }
 }
 
 fn configure_style(context: &egui::Context, dark_mode: bool) {
@@ -1027,13 +1108,19 @@ fn configure_style(context: &egui::Context, dark_mode: bool) {
     style.visuals.widgets.inactive.weak_bg_fill = colors.button;
     style.visuals.widgets.inactive.fg_stroke.color = colors.text;
     style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, colors.border);
-    style.visuals.widgets.hovered.fg_stroke.color = colors.on_accent;
-    style.visuals.widgets.active.fg_stroke.color = colors.on_accent;
+    // Checkbox labels share these foregrounds but sit outside the filled indicator.
+    // Reserve on_accent text for buttons that explicitly paint an accent background.
+    for widget in [
+        &mut style.visuals.widgets.hovered,
+        &mut style.visuals.widgets.active,
+        &mut style.visuals.widgets.open,
+    ] {
+        widget.fg_stroke.color = colors.text;
+        widget.bg_fill = colors.status_bg;
+        widget.weak_bg_fill = colors.status_bg;
+        widget.bg_stroke = egui::Stroke::new(1.0_f32, colors.accent_hover);
+    }
     style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, colors.border);
-    style.visuals.widgets.active.bg_fill = colors.accent;
-    style.visuals.widgets.active.weak_bg_fill = colors.accent;
-    style.visuals.widgets.hovered.bg_fill = colors.accent_hover;
-    style.visuals.widgets.hovered.weak_bg_fill = colors.accent_hover;
     style.visuals.selection.bg_fill = colors.accent.linear_multiply(0.65);
     style.visuals.widgets.noninteractive.fg_stroke.color = colors.text;
     style.visuals.window_corner_radius = egui::CornerRadius::same(14);

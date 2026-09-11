@@ -17,6 +17,7 @@ native-tls = "0.2"
 pollster = "0.4"
 rand = "0.9"
 rsa = "0.9"
+rodio = { version = "0.20.1", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 shared-protocol = { path = "../shared-protocol" }

@@ -1,11 +1,55 @@
 # Chick Link 接手文档
 
 > 面向新对话、新 AI 与协作开发者。先读本文件，再核对当前代码和 Git 状态。
-> 更新日期：2026-09-05（Asia/Shanghai）。基线版本：v0.3.3。
+> 更新日期：2026-09-11（Asia/Shanghai）。基线发布版本：v0.3.3；新功能仍为开发构建。
 > 本文描述该时点的事实，不是永久指令；用户的新要求和实际代码优先。
 > 不含真实令牌、私钥、SSH 凭据或聊天内容。
 
 ## 1. 三分钟接手
+
+### 2026-09-10 最新网络与部署安排（覆盖旧 NAS 限制）
+
+- 用户已明确要求同步新 NAS：`smb://192.168.8.1/PCLink/Aiproject`，挂载 `/Volumes/PCLink`。
+- 源码目录 `Aiproject/OnlineDesktopPet`，Windows 测试包在其 `test-builds/20260910/windows`。
+- Mac 当前 LAN IP 为 `192.168.8.239`，本轮加密中继监听 18081 并启用 mDNS。
+- 阿里云 IP `47.94.13.254`，SSH 22；用户名与密钥登录信息待提供，用户说稍后部署。
+- 目标域名 `pet.narendra.cn`；公共 DoH 当时返回 NXDOMAIN，需要配置 A 记录，接手应重查。
+- 宝塔方案：公网 WSS 18443，后端 127.0.0.1:18080，保留 RSA/AES，不占 80/443/8080。
+- 参阅 `deploy/BAOTA.md`、`deploy/pet.narendra.cn.nginx.conf`、`deploy/baota.env.example`。
+- 新增连接 JSON：CHICK_CONFIG_PATH > exe 旁 chicklink-connection.json > 用户目录 connection.json；环境变量逐项覆盖。
+- 相对公钥路径基于 JSON 目录；双击/自启可读取持久配置，尚无连接设置 UI。
+- 新增 CHICK_DISCOVER_LAN=true/false；云端 JSON 默认关闭发现，LAN Windows 包开启发现。
+- `packaging/prepare-lan.py` 生成测试产物，不打印令牌；`deploy/lan-test.local/` 的服务器私钥不外发。
+- NAS 只分发 Windows 测试身份与公钥，不包含 Mac 身份或完整令牌表；这些测试凭据不上传 GitHub。
+- 修复深色模式复选框悬停/按下文字变暗：通用控件保持主题文字色和中性底色，强调色用于边框；新增两种主题对比度回归测试。
+- 小鸡上方的聊天气泡只显示消息正文，不带发送者昵称；聊天窗口和本地历史仍保留昵称。
+- 气泡按文字实际排版尺寸加留白收紧并水平居中；Mac 不再强制撑满窗口，Windows 不再使用固定宽高，保留 DPI 缩放及两行省略逻辑。
+- 新增伙伴在线监测：聊天页及右键/托盘伙伴标签显示在线、离线或未知；空闲气泡提示状态变化，不覆盖消息。自身断网显示未知而非误报对方离线。
+- 服务端在配对、重连发送状态快照，当前连接关闭时通知伙伴离线；15 秒无入站数据释放连接，客户端 12 秒未收到 Pong 则重连。沿用已有加密 Presence 事件，不采集应用活动。
+- 此功能需新版中继；本地测试中继重启会清空内存配对关系，需要重新配对。现有 v0.3.3 公开服务器包不含本次监测逻辑。
+- 2026-09-11 已核对加密集成测试通过：配对在线快照、正常关闭离线通知、重连在线通知、15 秒无心跳离线通知；Windows release 与 Mac/中继构建通过。NAS 测试目录沿用 20260910/windows。
+- 18 项自动测试通过；音频设备试听默认 ignored；Windows x64 release 构建通过，真机待用户测试。
+
+后文涉及旧 NAS、缺少云端 IP 或仅环境变量配置的描述属于历史基线，以本段为准。
+
+### v0.3.3 之后的开发中改动（尚未纳入上述 Release）
+
+- 新增 `pet-client/src/sound.rs`：本地合成的拍拍短音（约 220ms）与收到消息双音（约 420ms）。
+- 使用 rodio 0.20.1，关闭默认解码功能；有界工作队列、限频，播放结束释放音频输出。
+- 配对页/聊天设置有“柔和提示音”开关，保存到用户数据目录 `sounds-enabled.txt`，默认开启。
+- 网络事件通过 EventLoopProxy 即时唤醒 UI；远端拍拍触发本地动画、短音和状态提示，不回传产生回声。
+- 收到拍拍时不覆盖正在显示的聊天气泡；连续拍拍会限制声音频率。
+- 断线时不发送本地共享动作；超过 1 秒的排队拍拍会丢弃，避免重连后补播过期互动。
+- 新增真实双客户端加密 WebSocket 集成测试：未配对拒绝、双向拍拍、换肤、文字和无发送端回声。
+- 无协议版本变更，现有 v0.3.3 中继即可转发；两端更新客户端才能都获得新音效。
+- 集成测试需要允许本机回环端口；音效试听测试默认 ignored，需要真实音频设备。
+
+```sh
+cargo test --workspace
+cargo test -p pet-client preview_both_cues_on_audio_device -- --ignored
+```
+
+以下版本号、附件与 14 项测试记录特指已发布 v0.3.3，不能当作这些新改动已发布的证据。
 
 这是一个原生 Rust 跨 macOS / Windows 联机桌宠，产品名 **Chick Link**。
 两人共养一只小鸡，通过中继服务器配对、聊天、同步抚摸/换肤等互动。
@@ -44,7 +88,7 @@ git remote -v
 - 用户明确要求保留已有 RSA 加密部分，不能为了测试成功静默删掉或关闭它。
 - 不添加 AI / Codex 为 contributor，不添加 AI `Co-authored-by`。沿用用户自己的 Git 身份。
 - 旧 NAS 路径：`smb://192.168.4.101/R5A/Aiproject/OnlineDesktopPet`。
-- 后来用户明确说在外面、无局域网，**不用同步 NAS**。除非再次要求，不访问/同步 NAS。
+- 用户曾暂停旧 NAS 同步；2026-09-10 已明确授权同步上述新 NAS，旧地址不再使用。
 - 用户以前要求释放 NAS 文件占用但不要卸载挂载。不要主动卸载其 SMB 共享。
 - 用户最近已授权整理并发布 GitHub，v0.3.3 已完成；未来发布按当前任务授权执行。
 
@@ -410,5 +454,5 @@ cargo check --manifest-path third_party/open_source_candidates/examples/Cargo.to
 > 请先阅读仓库根目录 offread.md，并核对 git status、最近提交及相关代码。
 > 项目是 Chick Link 原生 Rust 双端桌宠，已发布 v0.3.3。保留 RSA/AES、Windows
 > layered-window 透明渲染、原生拖拽、延迟焦点恢复、显式 R10 和主题初始化修复。
-> 目前不访问 NAS，不覆盖协作改动，不添加 AI contributor。区分已实现与未验证，
+> 按最新网络安排使用新 NAS，不覆盖协作改动，不添加 AI contributor。区分已实现与未验证，
 > 根据我接下来描述的问题继续实施并验证。

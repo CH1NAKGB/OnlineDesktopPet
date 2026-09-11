@@ -222,7 +222,25 @@ fn draw_bubble(
 ) {
     let px = |logical: f32| (logical * scale_factor).round().max(1.0) as u32;
     let pet_height = px(144.0);
-    let bubble_height = height.saturating_sub(pet_height).min(px(72.0));
+    let Some(font) = font else { return };
+    let scale = PxScale::from(17.0 * scale_factor);
+    let scaled = font.as_scaled(scale);
+    let line_height = scaled.height() + 2.0 * scale_factor;
+    let max_text_width = (width as f32 - 20.0 * scale_factor).max(1.0);
+    let lines = wrap_text(font, scale, text, max_text_width, 2);
+    let text_width = lines
+        .iter()
+        .map(|line| {
+            line.chars()
+                .map(|ch| scaled.h_advance(scaled.glyph_id(ch)))
+                .sum::<f32>()
+        })
+        .fold(0.0_f32, f32::max);
+    let bubble_width = (text_width.ceil() as u32 + px(20.0)).min(width);
+    let left = (width - bubble_width) / 2;
+    let bubble_height = height
+        .saturating_sub(pet_height)
+        .min((lines.len().max(1) as f32 * line_height).ceil() as u32 + px(22.0));
     if bubble_height < px(24.0) {
         return;
     }
@@ -234,11 +252,11 @@ fn draw_bubble(
     let corner_bottom = px(17.0);
     let radius = px(10.0) as f32;
     for y in top..bubble_height.saturating_sub(bottom_gap) {
-        for x in margin_x..width.saturating_sub(margin_x) {
+        for x in margin_x..bubble_width.saturating_sub(margin_x) {
             let dx = if x < corner_x {
                 corner_x - x
-            } else if x > width.saturating_sub(corner_x + 1) {
-                x - width.saturating_sub(corner_x + 1)
+            } else if x > bubble_width.saturating_sub(corner_x + 1) {
+                x - bubble_width.saturating_sub(corner_x + 1)
             } else {
                 0
             } as f32;
@@ -250,7 +268,7 @@ fn draw_bubble(
                 0
             } as f32;
             if dx * dx + dy * dy <= radius * radius {
-                put_premultiplied(pixels, width, x, y, [255, 247, 220, 245]);
+                put_premultiplied(pixels, width, left + x, y, [255, 247, 220, 245]);
             }
         }
     }
@@ -261,13 +279,7 @@ fn draw_bubble(
             put_premultiplied(pixels, width, x, y, [255, 247, 220, 245]);
         }
     }
-    let Some(font) = font else { return };
-    let scale = PxScale::from(17.0 * scale_factor);
-    let scaled = font.as_scaled(scale);
-    let line_height = scaled.height() + 2.0 * scale_factor;
-    let text_left = 10.0 * scale_factor;
-    let max_text_width = width as f32 - 20.0 * scale_factor;
-    let lines = wrap_text(font, scale, text, max_text_width, 2);
+    let text_left = left as f32 + 10.0 * scale_factor;
     for (line_index, line) in lines.iter().take(2).enumerate() {
         let mut caret = point(
             text_left,

@@ -8,6 +8,7 @@ mod frame_pacer;
 mod lan_discovery;
 #[cfg(not(target_os = "windows"))]
 mod renderer;
+mod sound;
 mod startup;
 #[cfg(target_os = "windows")]
 mod windows_renderer;
@@ -60,7 +61,10 @@ enum NetworkEvent {
     Connecting,
     Connected,
     Latency(Duration),
-    SharedPetAction(SharedPetAction),
+    SharedPetAction {
+        sender_id: String,
+        action: SharedPetAction,
+    },
     DirectMessage {
         sender_id: String,
         sender_display_name: Option<String>,
@@ -82,8 +86,26 @@ enum NetworkEvent {
         former_partner_id: String,
     },
     ProfileUpdated(String),
+    Presence {
+        user_id: String,
+        state: shared_protocol::PresenceState,
+    },
     Error(String),
     Disconnected,
+}
+
+#[derive(Debug)]
+struct EventSender {
+    sender: mpsc::Sender<NetworkEvent>,
+    wake: winit::event_loop::EventLoopProxy<()>,
+}
+
+impl EventSender {
+    fn send(&self, event: NetworkEvent) -> Result<(), mpsc::SendError<NetworkEvent>> {
+        self.sender.send(event)?;
+        let _ = self.wake.send_event(());
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -91,6 +113,7 @@ enum NetworkCommand {
     SharedPetAction {
         recipient_id: String,
         action: SharedPetAction,
+        created_at: Instant,
     },
     DirectMessage {
         recipient_id: String,
@@ -453,6 +476,7 @@ fn tray_icon_rgba() -> Vec<u8> {
 }
 
 struct PetApp {
+    sounds: sound::Sounds,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     started_at: Instant,
@@ -464,6 +488,7 @@ struct PetApp {
     network_commands: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
     partner_id: Option<String>,
     partner_display_name: Option<String>,
+    partner_status: &'static str,
     display_name: String,
     pairing_code: String,
     bubble: Option<(String, Instant)>,
@@ -492,6 +517,7 @@ impl PetApp {
     ) -> Self {
         Self {
             window: None,
+            sounds: sound::Sounds::new(),
             renderer: None,
             started_at: Instant::now(),
             press_started_at: None,
@@ -502,6 +528,7 @@ impl PetApp {
             network_commands,
             partner_id,
             partner_display_name: None,
+            partner_status: "状态未知",
             display_name,
             pairing_code,
             bubble: None,
@@ -524,14 +551,30 @@ impl PetApp {
         match action {
             SharedPetAction::Pet => {
                 self.pet_until = Some(Instant::now() + Duration::from_secs(2));
+                self.sounds.play(sound::Cue::Pet);
+                if !share_with_partner {
+                    let name = self.partner_display_name.as_deref().unwrap_or("对方");
+                    let feedback = format!("{name} 拍拍了小鸡");
+                    if let Some(chat) = self.chat_window.as_mut() {
+                        chat.set_status(feedback.clone());
+                    }
+                    if self
+                        .bubble
+                        .as_ref()
+                        .is_none_or(|(_, until)| *until <= Instant::now())
+                    {
+                        self.show_bubble(feedback, Duration::from_secs(2));
+                    }
+                }
             }
             SharedPetAction::SetSkin { skin } => self.pet_skin = skin,
         }
-        if share_with_partner {
+        if share_with_partner && self.network_connected {
             if let Some(recipient_id) = self.partner_id.clone() {
                 let _ = self.network_commands.send(NetworkCommand::SharedPetAction {
                     recipient_id,
                     action,
+                    created_at: Instant::now(),
                 });
             }
         }
@@ -585,6 +628,15 @@ impl PetApp {
 
     fn update_network_labels(&mut self) {
         let label = self.network_label();
+        if let Some(partner) = self.partner_id.as_deref() {
+            let name = self.partner_display_name.as_deref().unwrap_or(partner);
+            let status = if self.network_connected {
+                self.partner_status
+            } else {
+                "状态未知"
+            };
+            self.update_partner_labels(Some(&format!("{name} · {status}")));
+        }
         #[cfg(target_os = "macos")]
         if let Some(menu) = self.menu.as_ref() {
             menu.update_quality(&label);
@@ -600,6 +652,11 @@ impl PetApp {
         }
         if let Some(chat_window) = self.chat_window.as_mut() {
             chat_window.set_network_status(label);
+            chat_window.set_partner_status(if self.network_connected {
+                self.partner_status
+            } else {
+                "状态未知（本机连接已断开）"
+            });
         }
     }
 
@@ -620,6 +677,11 @@ impl PetApp {
             }
         }
         if let Some(chat_window) = self.chat_window.as_mut() {
+            chat_window.set_partner_status(if self.network_connected {
+                self.partner_status
+            } else {
+                "状态未知（本机连接已断开）"
+            });
             chat_window.show();
         }
     }
@@ -627,6 +689,16 @@ impl PetApp {
     fn handle_chat_actions(&mut self, actions: Vec<ChatAction>) {
         for action in actions {
             match action {
+                ChatAction::SetSoundsEnabled(enabled) => {
+                    let error = self
+                        .sounds
+                        .set_enabled(enabled)
+                        .err()
+                        .map(|error| error.to_string());
+                    if let Some(chat) = self.chat_window.as_mut() {
+                        chat.finish_sound_change(self.sounds.enabled(), error);
+                    }
+                }
                 ChatAction::Pair(code) => {
                     let _ = self
                         .network_commands
@@ -891,6 +963,7 @@ impl ApplicationHandler for PetApp {
         while let Ok(event) = self.network_events.try_recv() {
             match event {
                 NetworkEvent::Connecting => {
+                    self.partner_status = "状态未知";
                     self.network_connected = false;
                     self.latency_ms = None;
                 }
@@ -903,24 +976,44 @@ impl ApplicationHandler for PetApp {
                     self.latency_ms = Some(rtt.as_millis() as u32);
                 }
                 NetworkEvent::Disconnected => {
+                    self.partner_status = "状态未知";
                     self.network_connected = false;
                     self.latency_ms = None;
                 }
-                NetworkEvent::SharedPetAction(action) => self.apply_shared_action(action, false),
+                NetworkEvent::SharedPetAction { sender_id, action } => {
+                    if self.partner_id.as_deref() == Some(sender_id.as_str()) {
+                        self.apply_shared_action(action, false);
+                    }
+                }
+                NetworkEvent::Presence { user_id, state } => {
+                    if self.partner_id.as_deref() == Some(user_id.as_str()) {
+                        let status = match state {
+                            shared_protocol::PresenceState::Online => "在线",
+                            shared_protocol::PresenceState::Away => "暂离",
+                            shared_protocol::PresenceState::Offline => "离线",
+                        };
+                        let changed = self.partner_status != status;
+                        self.partner_status = status;
+                        if changed && self.bubble.is_none() {
+                            self.show_bubble(format!("对方{status}"), Duration::from_secs(4));
+                        }
+                    }
+                }
                 NetworkEvent::DirectMessage {
                     sender_id,
                     sender_display_name,
                     body,
                 } => {
                     if let MessageBody::Text { text } = body {
+                        self.sounds.play(sound::Cue::Message);
                         let sender_name = sender_display_name.unwrap_or(sender_id);
-                        let entry = chat::ChatEntry::new(false, sender_name.clone(), text.clone());
+                        let entry = chat::ChatEntry::new(false, sender_name, text.clone());
                         if let Some(chat_window) = self.chat_window.as_mut() {
                             chat_window.push_message(entry);
                         } else {
                             chat::append_history(&entry);
                         }
-                        self.show_bubble(format!("{sender_name}: {text}"), Duration::from_secs(8));
+                        self.show_bubble(text, Duration::from_secs(8));
                     }
                 }
                 NetworkEvent::PairingCodeRegistered(code) => {
@@ -942,6 +1035,7 @@ impl ApplicationHandler for PetApp {
                     self.partner_display_name = partner_display_name.clone();
                     self.update_partner_labels(Some(&partner_label));
                     if is_new_pair {
+                        self.partner_status = "状态未知";
                         self.open_chat(event_loop);
                     }
                     if let Some(chat_window) = self.chat_window.as_mut() {
@@ -994,6 +1088,7 @@ impl ApplicationHandler for PetApp {
                         .clone()
                         .unwrap_or(former_partner_id);
                     self.partner_id = None;
+                    self.partner_status = "状态未知";
                     self.partner_display_name = None;
                     self.update_partner_labels(None);
                     self.open_chat(event_loop);
@@ -1071,7 +1166,7 @@ fn skin_to_uniform(skin: PetSkin) -> f32 {
 }
 
 fn main() -> anyhow::Result<()> {
-    let config = ClientConfig::default();
+    let config = ClientConfig::load()?;
     let (events_tx, events_rx) = mpsc::channel();
     let partner_id = config.partner_id.clone();
     let pairing_code = config.pairing_code.clone();
@@ -1081,8 +1176,12 @@ fn main() -> anyhow::Result<()> {
         .as_deref()
         .is_some_and(|value| matches!(value, "1" | "true" | "TRUE"));
     let (commands_tx, commands_rx) = tokio::sync::mpsc::unbounded_channel();
-    std::thread::spawn(move || network::run(config, events_tx, commands_rx));
     let event_loop = EventLoop::new()?;
+    let sender = EventSender {
+        sender: events_tx,
+        wake: event_loop.create_proxy(),
+    };
+    std::thread::spawn(move || network::run(config, sender, commands_rx));
     event_loop.run_app(&mut PetApp::new(
         events_rx,
         commands_tx,
@@ -1105,7 +1204,6 @@ mod network {
     };
     use std::fs;
     use std::path::Path;
-    use std::sync::mpsc::Sender;
     use std::time::{Duration, Instant};
     use tokio::sync::mpsc::UnboundedReceiver;
     use tokio_tungstenite::tungstenite::Message;
@@ -1114,7 +1212,7 @@ mod network {
 
     pub fn run(
         config: ClientConfig,
-        events: Sender<super::NetworkEvent>,
+        events: super::EventSender,
         mut commands: UnboundedReceiver<super::NetworkCommand>,
     ) {
         let runtime = tokio::runtime::Runtime::new().expect("network runtime");
@@ -1177,9 +1275,13 @@ mod network {
             let mut ping_timer = tokio::time::interval(Duration::from_secs(3));
             ping_timer.tick().await;
             let mut ping_sent_at = None;
+            let mut last_pong = Instant::now();
             loop {
                 tokio::select! {
                     _ = ping_timer.tick() => {
+                        if last_pong.elapsed() > Duration::from_secs(12) {
+                            break;
+                        }
                         if send_client_event(&mut socket, secure_channel.as_ref(), &ClientEvent::Ping).await.is_err() {
                             break;
                         }
@@ -1187,7 +1289,8 @@ mod network {
                     }
                     Some(command) = commands.recv() => {
                         let event = match command {
-                            super::NetworkCommand::SharedPetAction { recipient_id, action } => {
+                            super::NetworkCommand::SharedPetAction { recipient_id, action, created_at } => {
+                                if matches!(action, shared_protocol::SharedPetAction::Pet) && created_at.elapsed() > Duration::from_secs(1) { continue; }
                                 ClientEvent::SharedPetAction { recipient_id, action }
                             }
                             super::NetworkCommand::DirectMessage { recipient_id, body } => {
@@ -1227,12 +1330,13 @@ mod network {
                         };
                         match event {
                             ServerEvent::Pong => {
+                                last_pong = Instant::now();
                                 if let Some(sent_at) = ping_sent_at.take() {
                                     let _ = events.send(super::NetworkEvent::Latency(sent_at.elapsed()));
                                 }
                             }
-                            ServerEvent::SharedPetAction { action, .. } => {
-                                let _ = events.send(super::NetworkEvent::SharedPetAction(action));
+                            ServerEvent::SharedPetAction { sender_id, action } => {
+                                let _ = events.send(super::NetworkEvent::SharedPetAction { sender_id, action });
                             }
                             ServerEvent::DirectMessage { sender_id, sender_display_name, body } => {
                                 let _ = events.send(super::NetworkEvent::DirectMessage { sender_id, sender_display_name, body });
@@ -1266,6 +1370,9 @@ mod network {
                             }
                             ServerEvent::ProfileUpdated { display_name, .. } => {
                                 let _ = events.send(super::NetworkEvent::ProfileUpdated(display_name));
+                            }
+                            ServerEvent::Presence { user_id, state, .. } => {
+                                let _ = events.send(super::NetworkEvent::Presence { user_id, state });
                             }
                             ServerEvent::Error { message, .. } => {
                                 let _ = events.send(super::NetworkEvent::Error(message));

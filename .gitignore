@@ -3,5 +3,7 @@
 /.env
 /deploy/.env
 /deploy/secrets/
+**/chicklink-connection.json
+/deploy/lan-test.local/
 *.log
 *.local
