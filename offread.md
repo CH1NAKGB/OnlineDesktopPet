@@ -5,6 +5,11 @@
 
 ### v0.3.4 正式使用安排
 
+- 新增 Windows NSIS 一键安装器：packaging/windows/build-installer.sh public|private。
+  公共 Setup.exe 不含令牌；私用 Setup 在 dist/private-v0.3.4，仅同步 NAS，不能上传 GitHub。
+  默认当前用户安装，无需管理员权限，升级/卸载保留 APPDATA。见 packaging/WINDOWS-INSTALL.md。
+  安装器编译及载荷检查不等于 Windows 真机安装/卸载验收。
+
 - 两端源码与 NAS 的 pet-client 目录已逐文件核对一致，本次统一构建 macOS 双架构和 Windows x64。
 - 公共 DMG/EXE/ZIP 不含身份令牌；NAS 私用 Windows 目录单独保留原有云端身份。
 - Mac 云端配置安装到 ~/Library/Application Support/ChickLink/connection.json，公钥同目录；不清空历史和昵称。
