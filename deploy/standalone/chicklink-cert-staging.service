@@ -1,0 +1,18 @@
+[Unit]
+Description=Chick Link staging certificate verification (never deployed)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/chicklink/bin/renew-certificate.sh staging
+TimeoutStartSec=1800
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+MemoryAccounting=true
+MemoryLimit=256M
+CPUAccounting=true
+CPUQuota=25%
+Nice=10

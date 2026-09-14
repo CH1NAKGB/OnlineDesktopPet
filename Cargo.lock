@@ -3038,7 +3038,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pet-client"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -3443,7 +3443,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay-server"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -3451,6 +3451,7 @@ dependencies = [
  "local-ip-address",
  "mdns-sd",
  "rsa",
+ "serde",
  "serde_json",
  "shared-protocol",
  "tokio",
@@ -3733,7 +3734,7 @@ dependencies = [
 
 [[package]]
 name = "shared-protocol"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aes-gcm",
  "base64",

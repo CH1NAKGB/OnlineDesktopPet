@@ -1,16 +1,24 @@
-"""Create private, role-specific LAN test packages; never print tokens."""
+"""Create private, role-specific connection packages; never print tokens."""
 import argparse
 import json
 import os
 from pathlib import Path
 import shutil
+from urllib.parse import urlparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--host", required=True)
+address = parser.add_mutually_exclusive_group(required=True)
+address.add_argument("--host")
+address.add_argument("--relay-url")
 parser.add_argument("--port", type=int, default=18081)
 parser.add_argument("--secrets", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
 args = parser.parse_args()
+if args.relay_url:
+    parsed = urlparse(args.relay_url)
+    if parsed.scheme != "wss" or not parsed.hostname or parsed.username or parsed.password:
+        parser.error("--relay-url must be a wss URL without embedded credentials")
+relay_url = args.relay_url or f"ws://{args.host}:{args.port}/ws"
 os.umask(0o077)
 tokens = dict(line.split("=", 1) for line in
               (args.secrets / "client-tokens.env").read_text().splitlines() if line)
@@ -21,9 +29,9 @@ for role, token_key, discover in [
     directory = args.output / role
     directory.mkdir(parents=True, exist_ok=True)
     config = {
-        "relay_url": f"ws://{args.host}:{args.port}/ws",
+        "relay_url": relay_url,
         "access_token": tokens[token_key],
-        "discover_lan_relay": discover,
+        "discover_lan_relay": discover and not args.relay_url,
         "server_rsa_public_key_path": "relay-public.pem",
     }
     (directory / "chicklink-connection.json").write_text(json.dumps(config, indent=2) + "\n")
@@ -37,4 +45,4 @@ for role, token_key, discover in [
             b'set "CHICK_SERVER_RSA_PUBLIC_KEY_PATH="\r\nset "CHICK_TLS_CA_CERT_PATH="\r\n'
             b'set "CHICK_DISCOVER_LAN="\r\nset "CHICK_OPEN_CHAT=1"\r\n'
             b'pet-client.exe\r\nif errorlevel 1 pause\r\n')
-print(f"LAN packages prepared for {args.host}:{args.port}; credentials not printed.")
+print(f"Connection packages prepared for {relay_url}; credentials not printed.")

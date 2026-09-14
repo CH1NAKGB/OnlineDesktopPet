@@ -1,0 +1,17 @@
+[Unit]
+Description=Chick Link certificate renewal and verified deployment
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/chicklink/bin/renew-certificate.sh production
+TimeoutStartSec=1800
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+MemoryAccounting=true
+MemoryLimit=256M
+CPUAccounting=true
+CPUQuota=25%
+Nice=10

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Chick Link certificate twice daily
+
+[Timer]
+OnCalendar=*-*-* 04,16:00:00
+AccuracySec=15min
+Persistent=true
+Unit=chicklink-cert-renew.service
+
+[Install]
+WantedBy=timers.target

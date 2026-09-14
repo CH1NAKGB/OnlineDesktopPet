@@ -1,0 +1,35 @@
+[Unit]
+Description=Chick Link dedicated TLS proxy
+After=network.target chicklink-relay.service
+Requires=chicklink-relay.service
+
+[Service]
+StartLimitInterval=60
+StartLimitBurst=5
+Type=simple
+User=chicklink
+Group=chicklink
+WorkingDirectory=/opt/chicklink
+Environment=HOME=/opt/chicklink/state
+Environment=XDG_DATA_HOME=/opt/chicklink/state/data
+Environment=XDG_CONFIG_HOME=/opt/chicklink/state/config
+Environment=GOMEMLIMIT=96MiB
+Environment=GOMAXPROCS=1
+ExecStart=/opt/chicklink/bin/caddy run --config /opt/chicklink/config/Caddyfile --adapter caddyfile
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+MemoryAccounting=true
+MemoryLimit=160M
+CPUAccounting=true
+CPUQuota=25%
+Nice=10
+LimitNOFILE=2048
+
+[Install]
+WantedBy=multi-user.target

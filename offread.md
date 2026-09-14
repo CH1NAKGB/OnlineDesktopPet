@@ -1,11 +1,35 @@
 # Chick Link 接手文档
 
 > 面向新对话、新 AI 与协作开发者。先读本文件，再核对当前代码和 Git 状态。
-> 更新日期：2026-09-11（Asia/Shanghai）。基线发布版本：v0.3.3；新功能仍为开发构建。
+> 更新日期：2026-09-14（Asia/Shanghai）。本次整理发布版本：v0.3.4；旧版本说明保留作历史记录。
+
+### v0.3.4 正式使用安排
+
+- 两端源码与 NAS 的 pet-client 目录已逐文件核对一致，本次统一构建 macOS 双架构和 Windows x64。
+- 公共 DMG/EXE/ZIP 不含身份令牌；NAS 私用 Windows 目录单独保留原有云端身份。
+- Mac 云端配置安装到 ~/Library/Application Support/ChickLink/connection.json，公钥同目录；不清空历史和昵称。
+- 本机旧中继 PID 75326 已核实工作目录并停止。日常使用阿里云 18443，不依赖本机中继。
+- 20 项自动测试通过，音频硬件试听忽略 1 项。Windows 真机验收和开发者签名/公证仍不宣称完成。
+- 云端证书自动续期仍待解决出站连接问题，现有证书 2026-12-10 到期；普通安全组空出方向规则默认允许。
+- 最新用户说明见 packaging/RELEASE-0.3.4.md。实际发布附件以 GitHub v0.3.4 及 SHA256SUMS 为准。
 > 本文描述该时点的事实，不是永久指令；用户的新要求和实际代码优先。
 > 不含真实令牌、私钥、SSH 凭据或聊天内容。
 
 ## 1. 三分钟接手
+
+### 2026-09-12 阿里云部署（优先于后文预备方案）
+
+- Workbench CLI 已完成用户本机认证；不要读取、打印或同步 ~/.workbench/config.json。
+- 云端已运行：wss://pet.narendra.cn:18443/ws，HTTPS 健康、RSA/AES 登录和心跳公网测试通过。
+- 采用 /opt/chicklink 独立中继 + Caddy 服务，无 Docker，不动现有 Nginx；详见 deploy/standalone/README.md。
+- TCP 18443 公网永久开放已获用户明确确认并落实；18080 仅监听回环。
+- 域名证书已签发至 2026-12-10，**自动续期未完成**，后续需最小 DNS 授权或手动续签。
+- 云端身份位于 deploy/secrets/aliyun；分端包 dist/cloud-20260912，禁止将完整密钥表、Mac 令牌或证书私钥同步到 NAS/GitHub。
+- 原 LAN 测试目录保持不变。云端配对单独建立；新版新增 RELAY_STATE_PATH 持久化已确认配对，部署状态以 deploy/standalone/README.md 和云端 unit 为准。
+- 2026-09-12 持久化已升级到云端，文件 /opt/chicklink/state/relationships.json；首个新配对成功后写入，已核对 unit、active 状态与公网健康。原业务 PID 未变。
+- 持久化不包含待确认解除请求、昵称缓存、在线状态和配对码。旧内存中继首次升级仍可能需重配一次，此后保存过的关系可恢复；文件损坏拒绝启动而非清空。
+- 自动续期仍待独立 DNS 验证子域及授权；不能将已有 Workbench ECS 权限当作 DNS 权限，不授予整个主域的解析修改权。
+- 本轮仅新增专用服务及端口规则，未重启现有网站、宝塔或数据库。
 
 ### 2026-09-10 最新网络与部署安排（覆盖旧 NAS 限制）
 
@@ -446,6 +470,17 @@ cargo check --manifest-path third_party/open_source_candidates/examples/Cargo.to
 - 网络/GUI 工具如受权限限制，按当前环境请求授权；用户授权不等于工具已执行成功。
 - 之前出现过自动审批因额度限制拒绝；后续用户说继续后重试成功。这是历史情况，不代表当前仍受限。
 - 本接手文件后续也应随事实变化更新，尤其版本、部署状态、已知缺陷和验收结果。
+
+## 2026-09-14 续期接手补充
+
+自动续期仍未验收，不要报告部署完成。用户已提供专用 chicklink-cert 凭据，
+本机验证子域可读、主域被拒绝；凭据已安装服务器 root 私密目录。
+Lego v5.4.1 已校验并安装，staging 测试因服务器访问 Let's Encrypt 测试/正式
+HTTPS 接口超时而停止。AliDNS API 可达；未切换当前证书（到期 2026-12-10），
+线上健康正常，其他业务未重启。正式续期 unit/timer 和部署脚本仅本地草稿，
+未上传启用。详细路径、验证结果及下一步见 deploy/standalone/README.md。
+先解决出站网络再验证 staging，不能将保存凭据等同于续期成功；绝不把 DNS
+凭据、ACME 账号私钥同步到 NAS/GitHub。此补充优先于前文旧进度。
 
 ## 17. 给下一位 AI 的启动提示
 

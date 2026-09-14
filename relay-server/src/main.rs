@@ -18,6 +18,8 @@ use shared_protocol::{
 use tokio::sync::{RwLock, mpsc};
 use tracing::{info, warn};
 
+mod persistence;
+
 const LAN_SERVICE_TYPE: &str = "_chicklink._tcp.local.";
 
 type Tx = mpsc::UnboundedSender<ServerEvent>;
@@ -35,6 +37,7 @@ struct AppState {
     unpair_notifications: Arc<RwLock<HashMap<String, String>>>,
     display_names: Arc<RwLock<HashMap<String, String>>>,
     encryption_private_key: Option<Arc<RsaPrivateKey>>,
+    relationship_store: persistence::Store,
 }
 
 #[tokio::main]
@@ -50,15 +53,19 @@ async fn main() -> anyhow::Result<()> {
             "RELAY_REQUIRE_PROVISIONED_TOKENS is set but no access-token file was configured"
         );
     }
+    let relationship_store =
+        persistence::Store::new(std::env::var_os("RELAY_STATE_PATH").map(Into::into));
+    let saved_partners = relationship_store.load()?;
     let state = AppState {
         sessions: Arc::default(),
         access_tokens,
         pairing_codes: Arc::default(),
-        partners: Arc::default(),
+        partners: Arc::new(RwLock::new(saved_partners)),
         unpair_requests: Arc::default(),
         unpair_notifications: Arc::default(),
         display_names: Arc::default(),
         encryption_private_key,
+        relationship_store,
     };
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -339,8 +346,15 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                     );
                     continue;
                 }
-                partners.insert(id.clone(), partner_id.clone());
-                partners.insert(partner_id.clone(), id.clone());
+                let mut updated = partners.clone();
+                updated.insert(id.clone(), partner_id.clone());
+                updated.insert(partner_id.clone(), id.clone());
+                if let Err(error) = state.relationship_store.save(&updated).await {
+                    warn!(%error, "could not persist pairing");
+                    send_error(&outbound, "storage_failed", "配对保存失败，请稍后重试");
+                    continue;
+                }
+                *partners = updated;
                 drop(partners);
                 let names = state.display_names.read().await;
                 let _ = outbound.send(ServerEvent::Paired {
@@ -426,8 +440,21 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 }
 
                 let mut partners = state.partners.write().await;
-                partners.remove(id);
-                partners.remove(&requester_id);
+                let mut updated = partners.clone();
+                updated.remove(id);
+                updated.remove(&requester_id);
+                if let Err(error) = state.relationship_store.save(&updated).await {
+                    warn!(%error, "could not persist unpairing");
+                    drop(partners);
+                    state
+                        .unpair_requests
+                        .write()
+                        .await
+                        .insert(id.clone(), requester_id);
+                    send_error(&outbound, "storage_failed", "解除配对保存失败，请稍后重试");
+                    continue;
+                }
+                *partners = updated;
                 drop(partners);
                 state
                     .unpair_requests
@@ -755,6 +782,7 @@ mod tests {
             unpair_notifications: Arc::default(),
             display_names: Arc::default(),
             encryption_private_key: Some(key.clone()),
+            relationship_store: persistence::Store::new(None),
             access_tokens: Some(Arc::new(HashMap::from([
                 (token_a.clone(), "a".into()),
                 (token_b.clone(), "b".into()),
