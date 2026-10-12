@@ -10,7 +10,9 @@ https://pet.narendra.cn:18443 {
     tls /opt/chicklink/secrets/fullchain.pem /opt/chicklink/secrets/privkey.pem
     @relay path /ws /healthz
     handle @relay {
-        reverse_proxy 127.0.0.1:18080
+        reverse_proxy 127.0.0.1:18080 {
+            header_up X-ChickLink-Client-IP {http.request.remote.host}
+        }
     }
     handle {
         respond "Not found" 404

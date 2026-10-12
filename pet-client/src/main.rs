@@ -3,9 +3,11 @@
 mod animation;
 mod chat;
 mod chat_window;
+mod cloud_client;
 mod config;
 mod frame_pacer;
 mod lan_discovery;
+mod outbox;
 #[cfg(not(target_os = "windows"))]
 mod renderer;
 mod sound;
@@ -58,6 +60,12 @@ const PET_HEIGHT: f64 = 220.0;
 
 #[derive(Debug)]
 enum NetworkEvent {
+    OutboxStatus {
+        user_id: String,
+        pending: usize,
+        blocked: usize,
+    },
+    Cloud(shared_protocol::cloud::CloudResponse),
     Connecting,
     Connected,
     Latency(Duration),
@@ -110,6 +118,10 @@ impl EventSender {
 
 #[derive(Debug)]
 enum NetworkCommand {
+    Cloud {
+        request: shared_protocol::cloud::CloudRequest,
+        created_at: Instant,
+    },
     SharedPetAction {
         recipient_id: String,
         action: SharedPetAction,
@@ -123,6 +135,29 @@ enum NetworkCommand {
     RequestUnpair,
     RespondUnpair(bool),
     UpdateProfile(String),
+}
+
+// UI and network share one locked queue: neither can overwrite the other's acknowledgement.
+fn with_outbox<T>(
+    session: &cloud_client::Session,
+    action: impl FnOnce(&mut outbox::Outbox) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    type Cached = Option<(String, String, outbox::Outbox)>;
+    static QUEUE: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
+    let mut cached = QUEUE
+        .lock()
+        .map_err(|_| std::io::Error::other("待发送队列不可用"))?;
+    if !cached
+        .as_ref()
+        .is_some_and(|(server, user, _)| server == &session.server_url && user == &session.user_id)
+    {
+        *cached = Some((
+            session.server_url.clone(),
+            session.user_id.clone(),
+            outbox::Outbox::load(&session.server_url, &session.user_id)?,
+        ));
+    }
+    action(&mut cached.as_mut().unwrap().2)
 }
 
 #[cfg(target_os = "macos")]
@@ -476,6 +511,7 @@ fn tray_icon_rgba() -> Vec<u8> {
 }
 
 struct PetApp {
+    cloud_user: Option<String>,
     sounds: sound::Sounds,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -483,6 +519,8 @@ struct PetApp {
     press_started_at: Option<Instant>,
     pet_until: Option<Instant>,
     pet_skin: PetSkin,
+    wander: animation::Wander,
+    dragging: bool,
     pacer: FramePacer,
     network_events: mpsc::Receiver<NetworkEvent>,
     network_commands: tokio::sync::mpsc::UnboundedSender<NetworkCommand>,
@@ -516,6 +554,7 @@ impl PetApp {
         open_chat_on_start: bool,
     ) -> Self {
         Self {
+            cloud_user: None,
             window: None,
             sounds: sound::Sounds::new(),
             renderer: None,
@@ -523,6 +562,8 @@ impl PetApp {
             press_started_at: None,
             pet_until: None,
             pet_skin: PetSkin::Sunshine,
+            wander: animation::Wander::new(Instant::now()),
+            dragging: false,
             pacer: FramePacer::new(),
             network_events,
             network_commands,
@@ -554,7 +595,7 @@ impl PetApp {
                 self.sounds.play(sound::Cue::Pet);
                 if !share_with_partner {
                     let name = self.partner_display_name.as_deref().unwrap_or("对方");
-                    let feedback = format!("{name} 拍拍了小鸡");
+                    let feedback = format!("{name} 摸摸了小鸡");
                     if let Some(chat) = self.chat_window.as_mut() {
                         chat.set_status(feedback.clone());
                     }
@@ -689,6 +730,18 @@ impl PetApp {
     fn handle_chat_actions(&mut self, actions: Vec<ChatAction>) {
         for action in actions {
             match action {
+                ChatAction::Cloud(request) => {
+                    self.submit_cloud_request(request);
+                }
+                ChatAction::RetryOutbox => self.edit_outbox(false),
+                ChatAction::ClearOutbox => self.edit_outbox(true),
+                ChatAction::SetSoundTheme(theme) => {
+                    let error = self.sounds.set_theme(theme).err().map(|e| e.to_string());
+                    if let Some(chat) = self.chat_window.as_mut() {
+                        chat.finish_sound_theme(self.sounds.theme(), error);
+                    }
+                    self.sounds.play(sound::Cue::Pet);
+                }
                 ChatAction::SetSoundsEnabled(enabled) => {
                     let error = self
                         .sounds
@@ -724,6 +777,16 @@ impl PetApp {
                     let Some(recipient_id) = self.partner_id.clone() else {
                         continue;
                     };
+                    if self.cloud_user.is_some() {
+                        self.submit_cloud_request(
+                            shared_protocol::cloud::CloudRequest::SendMessage {
+                                client_id: cloud_client::new_message_id(),
+                                recipient_id,
+                                body: shared_protocol::cloud::CloudBody::Text { text },
+                            },
+                        );
+                        continue;
+                    }
                     let entry = chat::ChatEntry::new(true, "我".into(), text.clone());
                     if let Some(chat_window) = self.chat_window.as_mut() {
                         chat_window.push_message(entry);
@@ -745,6 +808,66 @@ impl PetApp {
                         .network_commands
                         .send(NetworkCommand::UpdateProfile(name));
                 }
+            }
+        }
+    }
+
+    fn submit_cloud_request(&mut self, request: shared_protocol::cloud::CloudRequest) {
+        if let shared_protocol::cloud::CloudRequest::SendMessage {
+            client_id,
+            recipient_id,
+            body,
+        } = request
+        {
+            let result = cloud_client::load_session()
+                .filter(|session| Some(&session.user_id) == self.cloud_user.as_ref())
+                .ok_or_else(|| std::io::Error::other("请先登录账号"))
+                .and_then(|session| {
+                    with_outbox(&session, |queue| {
+                        queue.enqueue(client_id, recipient_id, body.clone())?;
+                        Ok((queue.len(), queue.blocked_count()))
+                    })
+                });
+            if let Some(chat) = self.chat_window.as_mut() {
+                match result {
+                    Ok((pending, blocked)) => {
+                        chat.set_outbox_status(pending, blocked);
+                        chat.set_status("消息已保存在本机待发送，云端确认后显示到历史");
+                    }
+                    Err(error) => {
+                        if let shared_protocol::cloud::CloudBody::Text { text } = body {
+                            chat.restore_unsent_text(text);
+                        }
+                        chat.outbox_error(format!("未能加入待发送队列：{error}"));
+                    }
+                }
+            }
+        } else {
+            let _ = self.network_commands.send(NetworkCommand::Cloud {
+                request,
+                created_at: Instant::now(),
+            });
+        }
+    }
+
+    fn edit_outbox(&mut self, clear: bool) {
+        let result = cloud_client::load_session()
+            .filter(|session| Some(&session.user_id) == self.cloud_user.as_ref())
+            .ok_or_else(|| std::io::Error::other("请先登录账号"))
+            .and_then(|session| {
+                with_outbox(&session, |queue| {
+                    if clear {
+                        queue.clear()?;
+                    } else {
+                        queue.retry_all()?;
+                    }
+                    Ok((queue.len(), queue.blocked_count()))
+                })
+            });
+        if let Some(chat) = self.chat_window.as_mut() {
+            match result {
+                Ok((pending, blocked)) => chat.set_outbox_status(pending, blocked),
+                Err(error) => chat.outbox_error(error.to_string()),
             }
         }
     }
@@ -888,6 +1011,7 @@ impl ApplicationHandler for PetApp {
                 ..
             } => {
                 // Let macOS/Windows own the drag so the window stays locked to the pointer.
+                self.dragging = true;
                 let _ = window.drag_window();
                 self.press_started_at = Some(Instant::now());
                 self.pacer.activate();
@@ -898,6 +1022,7 @@ impl ApplicationHandler for PetApp {
                 button: MouseButton::Left,
                 ..
             } => {
+                self.dragging = false;
                 if self
                     .press_started_at
                     .take()
@@ -960,8 +1085,82 @@ impl ApplicationHandler for PetApp {
         let Some(window) = self.window.clone() else {
             return;
         };
+        if let (Some(monitor), Ok(position)) = (window.current_monitor(), window.outer_position()) {
+            let screen = monitor.size();
+            let before = self.wander.frame();
+            if let Some(x) = self.wander.advance(
+                Instant::now(),
+                position.x,
+                monitor.position().x,
+                screen.width,
+                window.outer_size().width,
+                window.scale_factor(),
+                self.dragging || window.is_visible() == Some(false),
+            ) {
+                window.set_outer_position(winit::dpi::PhysicalPosition::new(x, position.y));
+            }
+            if self.wander.frame() != before {
+                window.request_redraw();
+            }
+        }
         while let Ok(event) = self.network_events.try_recv() {
             match event {
+                NetworkEvent::OutboxStatus {
+                    user_id,
+                    pending,
+                    blocked,
+                } => {
+                    if self.cloud_user.as_deref() == Some(user_id.as_str()) {
+                        if let Some(chat) = self.chat_window.as_mut() {
+                            chat.set_outbox_status(pending, blocked);
+                        }
+                    }
+                }
+                NetworkEvent::Cloud(response) => {
+                    use shared_protocol::cloud::{CloudBody, CloudResponse};
+                    match &response {
+                        CloudResponse::Authenticated { user_id, .. } => {
+                            self.cloud_user = Some(user_id.clone())
+                        }
+                        CloudResponse::LoggedOut => self.cloud_user = None,
+                        _ => {}
+                    }
+                    match &response {
+                        CloudResponse::Authenticated { .. } | CloudResponse::LoggedOut => {
+                            self.partner_id = None;
+                            self.partner_display_name = None;
+                            self.partner_status = "状态未知";
+                            self.update_partner_labels(None);
+                            if matches!(
+                                &response,
+                                CloudResponse::LoggedOut
+                                    | CloudResponse::Authenticated {
+                                        recovery_code: Some(_),
+                                        ..
+                                    }
+                            ) {
+                                self.open_chat(event_loop);
+                            }
+                            if let Some(chat) = self.chat_window.as_mut() {
+                                chat.set_unpaired();
+                            }
+                        }
+                        CloudResponse::Message { item } => {
+                            if self.cloud_user.as_deref() == Some(item.recipient_id.as_str()) {
+                                let text = match &item.body {
+                                    CloudBody::Text { text } => text.clone(),
+                                    CloudBody::Image { .. } => "收到图片表情".into(),
+                                };
+                                self.show_bubble(text, Duration::from_secs(8));
+                                self.sounds.play(sound::Cue::Message);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if let Some(chat) = self.chat_window.as_mut() {
+                        chat.handle_cloud(&response);
+                    }
+                }
                 NetworkEvent::Connecting => {
                     self.partner_status = "状态未知";
                     self.network_connected = false;
@@ -981,7 +1180,9 @@ impl ApplicationHandler for PetApp {
                     self.latency_ms = None;
                 }
                 NetworkEvent::SharedPetAction { sender_id, action } => {
-                    if self.partner_id.as_deref() == Some(sender_id.as_str()) {
+                    if self.partner_id.as_deref() == Some(sender_id.as_str())
+                        || self.cloud_user.as_deref() == Some(sender_id.as_str())
+                    {
                         self.apply_shared_action(action, false);
                     }
                 }
@@ -1174,7 +1375,8 @@ fn main() -> anyhow::Result<()> {
     let open_chat_on_start = std::env::var("CHICK_OPEN_CHAT")
         .ok()
         .as_deref()
-        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE"));
+        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE"))
+        || (config.access_token.is_empty() && cloud_client::load_session().is_none());
     let (commands_tx, commands_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_loop = EventLoop::new()?;
     let sender = EventSender {
@@ -1198,6 +1400,7 @@ mod network {
     use futures_util::{SinkExt, StreamExt};
     use native_tls::Certificate;
     use rsa::{RsaPublicKey, pkcs8::DecodePublicKey, traits::PublicKeyParts};
+    use shared_protocol::cloud::{CloudRequest, CloudResponse};
     use shared_protocol::{
         ClientEvent, ClientFrame, PROTOCOL_VERSION, PresenceState, SecureChannel, ServerEvent,
         ServerFrame, encrypt_session_key,
@@ -1225,8 +1428,8 @@ mod network {
                 config.relay_url.clone()
             };
             let _ = events.send(super::NetworkEvent::Connecting);
-            let Ok((mut socket, _)) =
-                connect_to_relay(&relay_url, config.tls_ca_cert_path.as_deref()).await
+            let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(Duration::from_secs(10), connect_to_relay(&relay_url, config.tls_ca_cert_path.as_deref())).await
             else {
                 let _ = events.send(super::NetworkEvent::Disconnected);
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1244,8 +1447,15 @@ mod network {
                         continue;
                     }
                 },
+                None if relay_url == "wss://pet.narendra.cn:18443/ws" => {
+                    match begin_encryption_pem(&mut socket, include_str!("../assets/relay-public.pem")).await {
+                        Ok(channel) => Some(channel),
+                        Err(_) => { let _ = events.send(super::NetworkEvent::Error("云端加密握手失败".into())); tokio::time::sleep(Duration::from_secs(2)).await; continue; }
+                    }
+                }
                 None => None,
             };
+            let mut account = super::cloud_client::load_session().filter(|session| session.server_url == relay_url);
             let hello = ClientEvent::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 access_token: config.access_token.clone(),
@@ -1260,22 +1470,30 @@ mod network {
                 activity: None,
             };
             let mut initialized = true;
-            for event in [hello, register_code, presence] {
+            let initial = if let Some(session) = &account {
+                Some(ClientEvent::Cloud { request: CloudRequest::Resume { token: session.token.clone(), device_id: super::cloud_client::device_id() } })
+            } else if !config.access_token.is_empty() { Some(hello) } else { None };
+            if let Some(event) = initial {
                 if send_client_event(&mut socket, secure_channel.as_ref(), &event).await.is_err() {
                     let _ = events.send(super::NetworkEvent::Disconnected);
                     initialized = false;
-                    break;
                 }
             }
             if !initialized {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
-            let _ = events.send(super::NetworkEvent::Connected);
             let mut ping_timer = tokio::time::interval(Duration::from_secs(3));
             ping_timer.tick().await;
             let mut ping_sent_at = None;
             let mut last_pong = Instant::now();
+            let mut last_sync = Instant::now();
+            let mut last_resume = Instant::now();
+            let mut authenticated = false;
+            let mut syncing = false;
+            let mut load_stickers_after_sync = false;
+            let mut outbox_in_flight: Option<(String, Instant)> = None;
+            let mut outbox_retry_after = Instant::now();
             loop {
                 tokio::select! {
                     _ = ping_timer.tick() => {
@@ -1286,9 +1504,57 @@ mod network {
                             break;
                         }
                         ping_sent_at = Some(Instant::now());
+                        if authenticated && secure_channel.is_some() {
+                            if let Some(session) = &account {
+                                let next = super::with_outbox(session, |queue| {
+                                    let _ = events.send(super::NetworkEvent::OutboxStatus { user_id: session.user_id.clone(), pending: queue.len(), blocked: queue.blocked_count() });
+                                    Ok(queue.next().map(|entry| (entry.client_id.clone(), entry.recipient_id.clone(), entry.body.clone())))
+                                });
+                                match next {
+                                    Ok(Some((client_id, recipient_id, body))) if Instant::now() >= outbox_retry_after && outbox_in_flight.as_ref().is_none_or(|(_, sent)| sent.elapsed() > Duration::from_secs(15)) => {
+                                        let request = CloudRequest::SendMessage { client_id: client_id.clone(), recipient_id, body };
+                                        if send_client_event(&mut socket, secure_channel.as_ref(), &ClientEvent::Cloud { request }).await.is_err() { break; }
+                                        outbox_in_flight = Some((client_id, Instant::now()));
+                                    }
+                                    Err(_) => { let _ = events.send(super::NetworkEvent::Error("无法读取待发送队列，请检查磁盘权限；原文件未被覆盖".into())); }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if !authenticated && last_resume.elapsed() > Duration::from_secs(6) {
+                            if let Some(session) = &account {
+                                let request = CloudRequest::Resume { token: session.token.clone(), device_id: super::cloud_client::device_id() };
+                                if send_client_event(&mut socket, secure_channel.as_ref(), &ClientEvent::Cloud { request }).await.is_err() { break; }
+                            }
+                            last_resume = Instant::now();
+                        }
+                        if authenticated && !syncing && last_sync.elapsed() > Duration::from_secs(30) {
+                            if let Some(session) = &account {
+                                let request = CloudRequest::Sync { after: super::cloud_client::cursor(session) };
+                                if send_client_event(&mut socket, secure_channel.as_ref(), &ClientEvent::Cloud { request }).await.is_err() { break; }
+                                syncing = true;
+                            }
+                            last_sync = Instant::now();
+                        }
                     }
                     Some(command) = commands.recv() => {
                         let event = match command {
+                            super::NetworkCommand::Cloud { mut request, created_at } => {
+                                if created_at.elapsed() > Duration::from_secs(20) {
+                                    let _ = events.send(super::NetworkEvent::Cloud(CloudResponse::Error { message: "操作因断线等待过久，已取消；请重试".into() }));
+                                    continue;
+                                }
+                                if secure_channel.is_none() { let _ = events.send(super::NetworkEvent::Error("账号操作需要 RSA 加密连接".into())); continue; }
+                                match &mut request {
+                                    CloudRequest::Register { device_id, legacy_token, .. } => {
+                                        *device_id = super::cloud_client::device_id();
+                                        if !config.access_token.is_empty() && account.is_none() { *legacy_token = Some(config.access_token.clone()); }
+                                    }
+                                    CloudRequest::Login { device_id, .. } | CloudRequest::Recover { device_id, .. } => *device_id = super::cloud_client::device_id(),
+                                    _ => {}
+                                }
+                                ClientEvent::Cloud { request }
+                            }
                             super::NetworkCommand::SharedPetAction { recipient_id, action, created_at } => {
                                 if matches!(action, shared_protocol::SharedPetAction::Pet) && created_at.elapsed() > Duration::from_secs(1) { continue; }
                                 ClientEvent::SharedPetAction { recipient_id, action }
@@ -1329,6 +1595,85 @@ mod network {
                             continue;
                         };
                         match event {
+                            ServerEvent::Cloud { response } => {
+                                let mut duplicate_message = false;
+                                let persisted: std::io::Result<()> = match &response {
+                                    CloudResponse::Authenticated { user_id, username, token, .. } => {
+                                        outbox_in_flight = None;
+                                        outbox_retry_after = Instant::now();
+                                        let session = super::cloud_client::Session { user_id: user_id.clone(), username: username.clone(), token: token.clone(), server_url: relay_url.clone() };
+                                        let result = super::cloud_client::save_session(&session);
+                                        account = Some(session);
+                                        result
+                                    }
+                                    CloudResponse::LoggedOut => { account = None; authenticated = false; syncing = false; outbox_in_flight = None; super::cloud_client::clear_session() }
+                                    CloudResponse::Message { item } => {
+                                        if let Some(session) = &account {
+                                            super::cloud_client::append_cloud_history(session, item).and_then(|inserted| {
+                                                duplicate_message = !inserted;
+                                                if item.sender_id == session.user_id {
+                                                    super::with_outbox(session, |queue| queue.ack(&item.client_id))?;
+                                                    if outbox_in_flight.as_ref().is_some_and(|(id, _)| id == &item.client_id) { outbox_in_flight = None; }
+                                                }
+                                                Ok(())
+                                            })
+                                        } else { Ok(()) }
+                                    }
+                                    CloudResponse::SendRejected { client_id, retryable, .. } => {
+                                        // Only a rejection for this connection's outstanding send can change its retry state.
+                                        if outbox_in_flight.as_ref().is_some_and(|(id, _)| id == client_id) {
+                                            outbox_in_flight = None;
+                                            if *retryable { outbox_retry_after = Instant::now() + Duration::from_secs(60); Ok(()) }
+                                            else if let Some(session) = &account { super::with_outbox(session, |queue| queue.block(client_id)) }
+                                            else { Ok(()) }
+                                        } else { Ok(()) }
+                                    }
+                                    CloudResponse::History { items, next_cursor, .. } => {
+                                        if let Some(session) = &account {
+                                            items.iter().try_for_each(|item| super::cloud_client::append_cloud_history(session, item).map(|_| ()))
+                                                .and_then(|_| super::cloud_client::save_cursor(session, *next_cursor))
+                                        } else { Ok(()) }
+                                    }
+                                    _ => Ok(()),
+                                };
+                                if persisted.is_err() {
+                                    let _ = events.send(super::NetworkEvent::Error("无法保存本机账号或历史，请检查磁盘权限；同步游标未推进".into()));
+                                    syncing = false;
+                                }
+                                if let CloudResponse::History { next_cursor, has_more, .. } = &response {
+                                    syncing = false;
+                                    if persisted.is_ok() && *has_more {
+                                        let request = CloudRequest::Sync { after: *next_cursor };
+                                        if send_client_event(&mut socket, secure_channel.as_ref(), &ClientEvent::Cloud { request }).await.is_err() { break; }
+                                        syncing = true;
+                                    } else if load_stickers_after_sync {
+                                        load_stickers_after_sync = false;
+                                        let _ = send_client_event(&mut socket, secure_channel.as_ref(), &ClientEvent::Cloud { request: CloudRequest::ListStickers }).await;
+                                    }
+                                    last_sync = Instant::now();
+                                }
+                                if matches!(response, CloudResponse::Error { .. }) { syncing = false; }
+                                let response = if duplicate_message {
+                                    if let CloudResponse::Message { item } = response {
+                                        // Merge retries into the UI without repeating the incoming sound or bubble.
+                                        CloudResponse::History { items: vec![item], next_cursor: 0, has_more: false }
+                                    } else { response }
+                                } else { response };
+                                let _ = events.send(super::NetworkEvent::Cloud(response));
+                            }
+                            ServerEvent::Ready { .. } => {
+                                authenticated = true;
+                                let _ = events.send(super::NetworkEvent::Connected);
+                                for event in [&register_code, &presence] {
+                                    let _ = send_client_event(&mut socket, secure_channel.as_ref(), event).await;
+                                }
+                                if let Some(session) = &account {
+                                    let request = CloudRequest::Sync { after: super::cloud_client::cursor(session) };
+                                    let _ = send_client_event(&mut socket, secure_channel.as_ref(), &ClientEvent::Cloud { request }).await;
+                                    syncing = true;
+                                    load_stickers_after_sync = true;
+                                }
+                            }
                             ServerEvent::Pong => {
                                 last_pong = Instant::now();
                                 if let Some(sent_at) = ping_sent_at.take() {
@@ -1374,10 +1719,10 @@ mod network {
                             ServerEvent::Presence { user_id, state, .. } => {
                                 let _ = events.send(super::NetworkEvent::Presence { user_id, state });
                             }
-                            ServerEvent::Error { message, .. } => {
+                            ServerEvent::Error { code, message } => {
+                                if code == "session_expired" { account = None; let _ = super::cloud_client::clear_session(); let _ = events.send(super::NetworkEvent::Cloud(CloudResponse::LoggedOut)); }
                                 let _ = events.send(super::NetworkEvent::Error(message));
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -1397,6 +1742,13 @@ mod network {
         public_key_path: &Path,
     ) -> anyhow::Result<SecureChannel> {
         let pem = fs::read_to_string(public_key_path)?;
+        begin_encryption_pem(socket, &pem).await
+    }
+
+    async fn begin_encryption_pem(
+        socket: &mut RelaySocket,
+        pem: &str,
+    ) -> anyhow::Result<SecureChannel> {
         let public_key = RsaPublicKey::from_public_key_pem(&pem)?;
         if public_key.n().bits() < 2048 {
             anyhow::bail!("服务端 RSA 公钥必须至少为 2048 位");
@@ -1426,7 +1778,11 @@ mod network {
         } else {
             serde_json::to_string(event)?
         };
-        socket.send(Message::Text(json.into())).await?;
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            socket.send(Message::Text(json.into())),
+        )
+        .await??;
         Ok(())
     }
 

@@ -6,6 +6,11 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+argon2 = "0.5"
+rusqlite = { version = "0.40", features = ["bundled"] }
+base64 = "0.22"
+sha2 = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 local-ip-address = "0.6"

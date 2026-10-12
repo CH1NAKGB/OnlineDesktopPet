@@ -18,12 +18,92 @@ use shared_protocol::{
 use tokio::sync::{RwLock, mpsc};
 use tracing::{info, warn};
 
+mod cloud;
+#[cfg(test)]
+mod cloud_integration;
+mod cloud_service;
 mod persistence;
 
 const LAN_SERVICE_TYPE: &str = "_chicklink._tcp.local.";
 
-type Tx = mpsc::UnboundedSender<ServerEvent>;
-type Sessions = Arc<RwLock<HashMap<String, Tx>>>;
+#[derive(Clone)]
+struct Tx(mpsc::Sender<QueuedEvent>, Arc<tokio::sync::Notify>);
+
+struct QueuedEvent {
+    event: ServerEvent,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+const OUTBOUND_BYTES: usize = 8 * 1024 * 1024;
+
+fn queued_event(event: ServerEvent) -> Result<QueuedEvent, ()> {
+    static BUDGET: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    reserve_event(
+        event,
+        BUDGET
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(OUTBOUND_BYTES)))
+            .clone(),
+    )
+}
+
+fn reserve_event(
+    event: ServerEvent,
+    budget: Arc<tokio::sync::Semaphore>,
+) -> Result<QueuedEvent, ()> {
+    struct Size(usize);
+    impl std::io::Write for Size {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            if self.0 > OUTBOUND_BYTES {
+                return Err(std::io::Error::other("Outbound event too large"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    // Reserve for serialized payload plus struct/string overhead, without allocating JSON twice.
+    let mut size = Size(4096);
+    serde_json::to_writer(&mut size, &event).map_err(|_| ())?;
+    let permit = budget
+        .try_acquire_many_owned(size.0 as u32)
+        .map_err(|_| ())?;
+    Ok(QueuedEvent {
+        event,
+        _permit: permit,
+    })
+}
+
+impl Tx {
+    fn send(&self, event: ServerEvent) -> Result<(), ()> {
+        queued_event(event)
+            .and_then(|event| self.0.try_send(event).map_err(|_| ()))
+            .map_err(|_| {
+                // Reconnect and replay durable history instead of silently dropping it.
+                self.1.notify_one();
+            })
+    }
+    fn try_send(&self, event: ServerEvent) -> Result<(), ()> {
+        self.send(event)
+    }
+    fn same_channel(&self, other: &Self) -> bool {
+        self.0.same_channel(&other.0)
+    }
+}
+type Sessions = Arc<RwLock<HashMap<String, Fanout>>>;
+
+#[derive(Default)]
+struct Fanout(Vec<Tx>);
+
+impl Fanout {
+    fn send(&self, event: ServerEvent) -> Result<(), ()> {
+        for channel in &self.0 {
+            let _ = channel.try_send(event.clone());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -38,6 +118,9 @@ struct AppState {
     display_names: Arc<RwLock<HashMap<String, String>>>,
     encryption_private_key: Option<Arc<RsaPrivateKey>>,
     relationship_store: persistence::Store,
+    cloud: Option<Arc<cloud::Store>>,
+    cloud_gate: Arc<tokio::sync::Semaphore>,
+    cloud_budget: Arc<std::sync::Mutex<cloud_service::Budget>>,
 }
 
 #[tokio::main]
@@ -66,6 +149,9 @@ async fn main() -> anyhow::Result<()> {
         display_names: Arc::default(),
         encryption_private_key,
         relationship_store,
+        cloud: cloud_service::open_store()?,
+        cloud_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+        cloud_budget: Arc::default(),
     };
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -82,7 +168,11 @@ async fn main() -> anyhow::Result<()> {
         .then(|| lan::announce(address.port()))
         .transpose()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -125,16 +215,39 @@ mod lan {
 
 async fn ws_handler(
     State(state): State<AppState>,
+    peer: Option<axum::extract::Extension<axum::extract::ConnectInfo<SocketAddr>>>,
+    headers: axum::http::HeaderMap,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| serve_socket(state, socket))
+    let mut peer_ip = peer
+        .map(|peer| peer.0.0.ip())
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    // Only the dedicated loopback proxy can supply this overwritten header.
+    if peer_ip.is_loopback() {
+        if let Some(ip) = headers
+            .get("X-ChickLink-Client-IP")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.parse().ok())
+        {
+            peer_ip = ip;
+        }
+    }
+    ws.max_message_size(1024 * 1024)
+        .max_frame_size(1024 * 1024)
+        .on_upgrade(move |socket| serve_socket(state, socket, peer_ip))
 }
 
-async fn serve_socket(state: AppState, socket: WebSocket) {
+async fn serve_socket(state: AppState, socket: WebSocket, peer_ip: std::net::IpAddr) {
+    static CONNECTIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
+    let Ok(_connection) = CONNECTIONS.try_acquire() else {
+        return;
+    };
     let (mut sink, mut stream) = socket.split();
     let secure_channel = match &state.encryption_private_key {
         Some(private_key) => {
-            let Some(Ok(Message::Text(text))) = stream.next().await else {
+            let Ok(Some(Ok(Message::Text(text)))) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), stream.next()).await
+            else {
                 return;
             };
             let Ok(ClientFrame::SecureHandshake {
@@ -152,10 +265,12 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
         }
         None => None,
     };
-    let (outbound, mut receiver) = mpsc::unbounded_channel();
+    let (outbound, mut receiver) = mpsc::channel(16);
+    let outbound = Tx(outbound, Arc::new(tokio::sync::Notify::new()));
     let writer_channel = secure_channel.clone();
     let writer = tokio::spawn(async move {
-        while let Some(event) = receiver.recv().await {
+        while let Some(queued) = receiver.recv().await {
+            let QueuedEvent { event, _permit } = queued;
             let json = if let Some(channel) = &writer_channel {
                 let Ok(frame) = channel.encrypt(&event) else {
                     continue;
@@ -167,16 +282,31 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
             let Ok(json) = json else {
                 continue;
             };
-            if sink.send(Message::Text(json.into())).await.is_err() {
+            if !matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    sink.send(Message::Text(json.into()))
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
                 break;
             }
+            drop(_permit);
         }
     });
 
     let mut user_id: Option<String> = None;
-    while let Ok(Some(Ok(message))) =
-        tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await
-    {
+    let mut cloud_token: Option<String> = None;
+    let mut unauthenticated_since = std::time::Instant::now();
+    'receive: while let Ok(Some(Ok(message))) = tokio::select! {
+        incoming = tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()) => incoming,
+        _ = outbound.1.notified() => break 'receive,
+    } {
+        if user_id.is_none() && unauthenticated_since.elapsed() > std::time::Duration::from_secs(60)
+        {
+            break;
+        }
         let text = match message {
             Message::Text(text) => text,
             Message::Close(_) => break,
@@ -191,14 +321,93 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
         } else {
             serde_json::from_str::<ClientEvent>(&text).map_err(|error| error.to_string())
         };
-        let Ok(event) = event else {
-            let _ = outbound.send(ServerEvent::Error {
+        let Ok(mut event) = event else {
+            let _ = outbound.try_send(ServerEvent::Error {
                 code: "invalid_event".into(),
                 message: "Invalid or unauthenticated message".into(),
             });
             continue;
         };
+        // Revalidate before every operation, including Cloud and Ping, not only legacy events.
+        if let Some(id) = &user_id {
+            let valid = if let Some(token) = &cloud_token {
+                state
+                    .cloud
+                    .as_ref()
+                    .and_then(|store| store.resolve_token(token).ok().flatten())
+                    .as_deref()
+                    == Some(id)
+            } else {
+                state
+                    .cloud
+                    .as_ref()
+                    .is_none_or(|store| !store.is_claimed_legacy(id).unwrap_or(true))
+            };
+            if !valid {
+                break;
+            }
+        }
+        if let ClientEvent::Cloud { request } = event {
+            if secure_channel.is_none() {
+                send_error(
+                    &outbound,
+                    "encryption_required",
+                    "账号功能需要 RSA 加密连接",
+                );
+                continue;
+            }
+            match cloud_service::handle(
+                &state,
+                &outbound,
+                user_id.as_deref(),
+                &mut cloud_token,
+                request,
+                peer_ip,
+            )
+            .await
+            {
+                cloud_service::Outcome::Authenticate(id) => {
+                    detach_session(&state, user_id.take().as_deref(), &outbound).await;
+                    event = ClientEvent::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                        access_token: String::new(),
+                        device_id: String::new(),
+                        display_name: Some(id),
+                    };
+                }
+                cloud_service::Outcome::Logout => {
+                    detach_session(&state, user_id.take().as_deref(), &outbound).await;
+                    unauthenticated_since = std::time::Instant::now();
+                    continue;
+                }
+                cloud_service::Outcome::Handled => continue,
+            }
+        }
+        if let Some(token) = &cloud_token {
+            if state
+                .cloud
+                .as_ref()
+                .and_then(|store| store.resolve_token(token).ok().flatten())
+                .is_none()
+            {
+                send_error(&outbound, "session_expired", "登录已失效，请重新登录");
+                break;
+            }
+        } else if user_id.as_ref().is_some_and(|id| {
+            state
+                .cloud
+                .as_ref()
+                .is_some_and(|store| store.is_claimed_legacy(id).unwrap_or(true))
+        }) {
+            send_error(
+                &outbound,
+                "session_expired",
+                "此身份已升级为账号，请用账号密码登录",
+            );
+            break;
+        }
         match event {
+            ClientEvent::Cloud { .. } => unreachable!(),
             ClientEvent::Hello {
                 protocol_version,
                 access_token,
@@ -209,26 +418,42 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                     break;
                 }
                 if protocol_version != PROTOCOL_VERSION {
-                    let _ = outbound.send(ServerEvent::Error {
+                    let _ = outbound.try_send(ServerEvent::Error {
                         code: "version_mismatch".into(),
                         message: "Update the desktop client".into(),
                     });
                     break;
                 }
-                let Some(id) = resolve_user_id(state.access_tokens.as_deref(), &access_token)
+                let Some(id) = cloud_token
+                    .as_ref()
+                    .and_then(|token| state.cloud.as_ref()?.resolve_token(token).ok().flatten())
+                    .or_else(|| {
+                        resolve_user_id(state.access_tokens.as_deref(), &access_token).filter(
+                            |id| {
+                                state.cloud.as_ref().is_none_or(|store| {
+                                    !store.is_claimed_legacy(id).unwrap_or(true)
+                                })
+                            },
+                        )
+                    })
                 else {
                     send_error(
                         &outbound,
                         "authentication_failed",
                         "Access token is invalid",
                     );
-                    break;
+                    continue;
                 };
-                state
-                    .sessions
-                    .write()
-                    .await
-                    .insert(id.clone(), outbound.clone());
+                {
+                    let mut sessions = state.sessions.write().await;
+                    let owner = sessions.entry(id.clone()).or_default();
+                    owner.0.retain(|tx| !tx.0.is_closed());
+                    if owner.0.len() >= 8 {
+                        send_error(&outbound, "too_many_devices", "最多同时连接八台设备");
+                        break;
+                    }
+                    owner.0.push(outbound.clone());
+                }
                 let display_name = display_name
                     .as_deref()
                     .and_then(shared_protocol::normalize_display_name)
@@ -238,7 +463,7 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                     .write()
                     .await
                     .insert(id.clone(), display_name);
-                let _ = outbound.send(ServerEvent::Ready {
+                let _ = outbound.try_send(ServerEvent::Ready {
                     user_id: id.clone(),
                 });
                 if let Some(former_partner_id) =
@@ -311,6 +536,13 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                     continue;
                 }
                 let mut codes = state.pairing_codes.write().await;
+                if let Some(existing) = codes
+                    .iter()
+                    .find_map(|(code, owner)| (owner == id).then(|| code.clone()))
+                {
+                    let _ = outbound.send(ServerEvent::PairingCodeRegistered { code: existing });
+                    continue;
+                }
                 match codes.get(&code) {
                     Some(owner) if owner != id => {
                         send_error(
@@ -357,11 +589,13 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 *partners = updated;
                 drop(partners);
                 let names = state.display_names.read().await;
-                let _ = outbound.send(ServerEvent::Paired {
-                    partner_id: partner_id.clone(),
-                    partner_display_name: names.get(&partner_id).cloned(),
-                    initiated_by_you: true,
-                });
+                if let Some(owner) = state.sessions.read().await.get(id) {
+                    let _ = owner.send(ServerEvent::Paired {
+                        partner_id: partner_id.clone(),
+                        partner_display_name: names.get(&partner_id).cloned(),
+                        initiated_by_you: true,
+                    });
+                }
                 if let Some(peer) = state.sessions.read().await.get(&partner_id) {
                     let _ = peer.send(ServerEvent::Paired {
                         partner_id: id.clone(),
@@ -396,9 +630,11 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                 requests.insert(partner_id.clone(), id.clone());
                 drop(requests);
 
-                let _ = outbound.send(ServerEvent::UnpairPending {
-                    partner_id: partner_id.clone(),
-                });
+                if let Some(owner) = state.sessions.read().await.get(id) {
+                    let _ = owner.send(ServerEvent::UnpairPending {
+                        partner_id: partner_id.clone(),
+                    });
+                }
                 if let Some(peer) = state.sessions.read().await.get(&partner_id) {
                     let requester_display_name = state.display_names.read().await.get(id).cloned();
                     let _ = peer.send(ServerEvent::UnpairRequested {
@@ -467,9 +703,11 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                             && requester != &requester_id
                     });
 
-                let _ = outbound.send(ServerEvent::Unpaired {
-                    former_partner_id: requester_id.clone(),
-                });
+                if let Some(owner) = state.sessions.read().await.get(id) {
+                    let _ = owner.send(ServerEvent::Unpaired {
+                        former_partner_id: requester_id.clone(),
+                    });
+                }
                 if let Some(peer) = state.sessions.read().await.get(&requester_id) {
                     let _ = peer.send(ServerEvent::Unpaired {
                         former_partner_id: id.clone(),
@@ -484,6 +722,19 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
             }
             ClientEvent::DirectMessage { recipient_id, body } => {
                 if user_id.is_none() {
+                    continue;
+                }
+                if cloud_token.is_some()
+                    || state
+                        .cloud
+                        .as_ref()
+                        .is_some_and(|store| store.is_claimed_legacy(&recipient_id).unwrap_or(true))
+                {
+                    send_error(
+                        &outbound,
+                        "cloud_upgrade_required",
+                        "请双方升级并登录云账号后聊天，避免消息未进入云历史",
+                    );
                     continue;
                 }
                 if !body.is_valid() {
@@ -537,6 +788,16 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
                             action,
                         });
                     }
+                    if let Some(owner) = state.sessions.read().await.get(sender_id) {
+                        for tx in &owner.0 {
+                            if !tx.same_channel(&outbound) {
+                                let _ = tx.send(ServerEvent::SharedPetAction {
+                                    sender_id: sender_id.clone(),
+                                    action,
+                                });
+                            }
+                        }
+                    }
                 }
             }
             ClientEvent::Presence {
@@ -562,20 +823,25 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
         }
     }
 
-    if let Some(id) = user_id {
-        let partner_id = state.partners.read().await.get(&id).cloned();
+    detach_session(&state, user_id.as_deref(), &outbound).await;
+    writer.abort();
+}
+
+async fn detach_session(state: &AppState, id: Option<&str>, outbound: &Tx) {
+    if let Some(id) = id {
+        let partner_id = state.partners.read().await.get(id).cloned();
         let mut sessions = state.sessions.write().await;
-        if sessions
-            .get(&id)
-            .is_some_and(|current| current.same_channel(&outbound))
-        {
-            sessions.remove(&id);
+        if let Some(current) = sessions.get_mut(id) {
+            current.0.retain(|tx| !tx.same_channel(outbound));
+        }
+        if sessions.get(id).is_some_and(|current| current.0.is_empty()) {
+            sessions.remove(id);
             if let Some(peer) = partner_id
                 .as_ref()
                 .and_then(|partner| sessions.get(partner))
             {
                 let _ = peer.send(ServerEvent::Presence {
-                    user_id: id.clone(),
+                    user_id: id.to_owned(),
                     state: PresenceState::Offline,
                     activity: None,
                 });
@@ -583,7 +849,6 @@ async fn serve_socket(state: AppState, socket: WebSocket) {
         }
         warn!(user_id = %id, "client disconnected");
     }
-    writer.abort();
 }
 
 async fn sync_presence(state: &AppState, id: &str) {
@@ -696,6 +961,31 @@ mod tests {
     use super::*;
     use shared_protocol::{PetSkin, SharedPetAction, encrypt_session_key};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WireMessage};
+
+    #[test]
+    fn outbound_budget_limits_queued_bytes_and_releases_on_drop() {
+        let budget = Arc::new(tokio::sync::Semaphore::new(8192));
+        let queued = reserve_event(ServerEvent::Pong, budget.clone())
+            .ok()
+            .unwrap();
+        assert!(budget.available_permits() < 4096);
+        assert!(reserve_event(ServerEvent::Pong, budget.clone()).is_err());
+        drop(queued);
+        assert_eq!(budget.available_permits(), 8192);
+        assert!(reserve_event(ServerEvent::Pong, budget).is_ok());
+        let budget = Arc::new(tokio::sync::Semaphore::new(OUTBOUND_BYTES));
+        assert!(
+            reserve_event(
+                ServerEvent::Error {
+                    code: "oversize".into(),
+                    message: "x".repeat(OUTBOUND_BYTES)
+                },
+                budget.clone()
+            )
+            .is_err()
+        );
+        assert_eq!(budget.available_permits(), OUTBOUND_BYTES);
+    }
     type TestSocket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >;
@@ -783,6 +1073,9 @@ mod tests {
             display_names: Arc::default(),
             encryption_private_key: Some(key.clone()),
             relationship_store: persistence::Store::new(None),
+            cloud: None,
+            cloud_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            cloud_budget: Arc::default(),
             access_tokens: Some(Arc::new(HashMap::from([
                 (token_a.clone(), "a".into()),
                 (token_b.clone(), "b".into()),

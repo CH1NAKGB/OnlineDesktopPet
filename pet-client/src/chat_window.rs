@@ -1,12 +1,20 @@
 use std::{
+    collections::VecDeque,
     fs,
-    sync::Arc,
+    io::{Cursor, Read},
+    path::{Path, PathBuf},
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use egui::{Color32, RichText};
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
+use sha2::{Digest, Sha256};
+use shared_protocol::cloud::{
+    CloudBody, CloudMessage, CloudRequest, CloudResponse, CloudSticker, ImageData,
+};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 #[cfg(target_os = "windows")]
@@ -23,6 +31,10 @@ use winit::{
 };
 
 use crate::chat::{self, ChatEntry};
+use crate::{
+    cloud_client::{self, Session},
+    sound::SoundTheme,
+};
 
 pub enum ChatAction {
     Pair(String),
@@ -30,8 +42,77 @@ pub enum ChatAction {
     Rename(String),
     SetLaunchAtLogin(bool),
     SetSoundsEnabled(bool),
+    SetSoundTheme(SoundTheme),
+    Cloud(CloudRequest),
+    RetryOutbox,
+    ClearOutbox,
     RequestUnpair,
     RespondUnpair(bool),
+}
+
+fn format_chat_time(unix_ms: u64, precise: bool) -> String {
+    let Some((year, month, day, hour, minute, second)) = local_datetime(unix_ms) else {
+        return "时间未知".to_owned();
+    };
+    if precise {
+        format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+    } else {
+        format!("{hour:02}:{minute:02}")
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn local_datetime(unix_ms: u64) -> Option<(i32, u32, u32, u32, u32, u32)> {
+    let seconds = libc::time_t::try_from(unix_ms / 1000).ok()?;
+    let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // localtime_r uses the machine's configured timezone and is safe for concurrent callers.
+    let result = unsafe { libc::localtime_r(&seconds, local.as_mut_ptr()) };
+    if result.is_null() {
+        return None;
+    }
+    let local = unsafe { local.assume_init() };
+    Some((
+        local.tm_year + 1900,
+        (local.tm_mon + 1) as u32,
+        local.tm_mday as u32,
+        local.tm_hour as u32,
+        local.tm_min as u32,
+        local.tm_sec as u32,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn local_datetime(unix_ms: u64) -> Option<(i32, u32, u32, u32, u32, u32)> {
+    use windows_sys::Win32::{
+        Foundation::{FILETIME, SYSTEMTIME},
+        System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime},
+    };
+
+    const WINDOWS_EPOCH_OFFSET_100NS: u64 = 116_444_736_000_000_000;
+    let ticks = unix_ms
+        .checked_mul(10_000)?
+        .checked_add(WINDOWS_EPOCH_OFFSET_100NS)?;
+    let file_time = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut utc = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    unsafe {
+        if FileTimeToSystemTime(&file_time, &mut utc) == 0
+            || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0
+        {
+            return None;
+        }
+    }
+    Some((
+        local.wYear as i32,
+        local.wMonth as u32,
+        local.wDay as u32,
+        local.wHour as u32,
+        local.wMinute as u32,
+        local.wSecond as u32,
+    ))
 }
 
 #[derive(Clone)]
@@ -51,6 +132,7 @@ pub struct ChatWindow {
     state: egui_winit::State,
     renderer: EguiRenderer,
     history: Vec<ChatEntry>,
+    selected_time: Option<usize>,
     input: String,
     pair_input: String,
     own_code: String,
@@ -61,6 +143,8 @@ pub struct ChatWindow {
     editing_name: bool,
     startup_enabled: bool,
     sounds_enabled: bool,
+    sound_theme: SoundTheme,
+    cloud: CloudUi,
     focus_pair_input: bool,
     focus_deadline: Option<Instant>,
     unpair_dialog: Option<UnpairDialog>,
@@ -140,6 +224,17 @@ impl ChatWindow {
             Some(adapter.limits().max_texture_dimension_2d as usize),
         );
         let renderer = EguiRenderer::new(&device, format, None, 1, false);
+        let cloud = CloudUi::new();
+        let history = cloud
+            .session
+            .as_ref()
+            .map_or_else(chat::load_history, |session| {
+                cloud
+                    .items
+                    .iter()
+                    .map(|item| ChatEntry::from_cloud(&session.user_id, item))
+                    .collect()
+            });
         Ok(Self {
             window,
             surface,
@@ -149,7 +244,8 @@ impl ChatWindow {
             context,
             state,
             renderer,
-            history: chat::load_history(),
+            history,
+            selected_time: None,
             input: String::new(),
             pair_input: String::new(),
             own_code,
@@ -160,6 +256,8 @@ impl ChatWindow {
             editing_name: false,
             startup_enabled: crate::startup::is_enabled(),
             sounds_enabled: crate::config::sounds_enabled(),
+            sound_theme: crate::config::sound_theme(),
+            cloud,
             focus_pair_input: true,
             focus_deadline: None,
             unpair_dialog: None,
@@ -177,6 +275,7 @@ impl ChatWindow {
     }
 
     pub fn show(&mut self) {
+        self.reload_cloud();
         self.focus_pair_input = self.partner_id.is_none();
         self.focus_deadline = Some(Instant::now() + Duration::from_millis(90));
         self.window.set_visible(true);
@@ -294,12 +393,171 @@ impl ChatWindow {
         self.window.request_redraw();
     }
 
+    /// `theme` is the effective (persisted) theme, including after a failed change.
+    pub fn finish_sound_theme(&mut self, theme: SoundTheme, error: Option<String>) {
+        self.sound_theme = theme;
+        self.status = error.map_or_else(
+            || format!("提示音：{}", theme.label()),
+            |error| format!("无法保存音效设置：{error}"),
+        );
+        self.window.request_redraw();
+    }
+
+    /// Parent persists all responses before forwarding them here, even when no window exists.
+    /// Parent also owns Resume/Sync pagination and ListStickers after authentication.
+    pub fn handle_cloud(&mut self, response: &CloudResponse) {
+        match response {
+            CloudResponse::Authenticated {
+                user_id,
+                username,
+                token,
+                recovery_code,
+            } => {
+                let changed = self.cloud.session.as_ref().map(|s| &s.user_id) != Some(user_id);
+                if changed {
+                    self.cloud.reset_account();
+                    self.history.clear();
+                    self.input.clear();
+                }
+                self.cloud.session = Some(Session {
+                    user_id: user_id.clone(),
+                    username: username.clone(),
+                    token: token.clone(),
+                    server_url: cloud_client::load_session()
+                        .filter(|session| session.user_id == *user_id)
+                        .map(|session| session.server_url)
+                        .unwrap_or_default(),
+                });
+                for item in self
+                    .cloud
+                    .session
+                    .as_ref()
+                    .map(cloud_client::load_cloud_history)
+                    .unwrap_or_default()
+                {
+                    cloud_client::merge_message(user_id, &mut self.cloud.items, &item);
+                }
+                if let Some(code) = recovery_code {
+                    let fingerprint = format!("{:x}", Sha256::digest(code.as_bytes()));
+                    if self.cloud.seen_recovery.as_ref() != Some(&fingerprint) {
+                        self.cloud.recovery_notice = Some(code.clone());
+                        self.cloud.seen_recovery = Some(fingerprint);
+                        self.cloud.recovery_saved = false;
+                    }
+                }
+                self.cloud.clear_credentials();
+                self.cloud.status = "云账号已登录".into();
+                self.cloud.auth_pending = false;
+                self.cloud.auth_deadline = None;
+                self.rebuild_cloud_history();
+            }
+            CloudResponse::LoggedOut => {
+                self.cloud.reset_account();
+                self.history.clear();
+                self.input.clear();
+                self.cloud.status = "已退出云账号".into();
+            }
+            CloudResponse::History { items, .. } => {
+                if let Some(session) = &self.cloud.session {
+                    for item in items {
+                        cloud_client::merge_message(&session.user_id, &mut self.cloud.items, item);
+                    }
+                    self.rebuild_cloud_history();
+                }
+            }
+            CloudResponse::Message { item } => {
+                self.apply_cloud_message(item);
+            }
+            CloudResponse::SendRejected {
+                message, retryable, ..
+            } => {
+                self.cloud.send_rejected(message, *retryable);
+                self.status = self.cloud.outbox_message.clone();
+            }
+            CloudResponse::Stickers { items } if self.cloud.session.is_some() => {
+                self.cloud.stickers = items.clone();
+                self.cloud.status = "表情库已同步".into();
+            }
+            CloudResponse::StickerSaved { item } if self.cloud.session.is_some() => {
+                self.cloud.stickers.retain(|old| old.id != item.id);
+                self.cloud.stickers.push(item.clone());
+                self.cloud.status = "已保存到云表情库".into();
+            }
+            CloudResponse::Error { message } => {
+                self.cloud.status = message.clone();
+                self.cloud.auth_pending = false;
+                self.cloud.auth_deadline = None;
+                self.cloud.clear_credentials();
+            }
+            _ => {}
+        }
+        self.window.request_redraw();
+    }
+
+    /// Counts come from the parent's outbox; pending includes blocked messages.
+    pub fn set_outbox_status(&mut self, pending: usize, blocked: usize) {
+        self.cloud.set_outbox_status(pending, blocked);
+        self.window.request_redraw();
+    }
+
+    pub fn outbox_error(&mut self, message: String) {
+        self.cloud.outbox_message = message.clone();
+        self.status = message;
+        self.window.request_redraw();
+    }
+
+    pub fn restore_unsent_text(&mut self, text: String) {
+        append_unsent_text(&mut self.input, &text);
+        self.window.request_redraw();
+    }
+
+    fn rebuild_cloud_history(&mut self) {
+        if let Some(session) = &self.cloud.session {
+            self.history = self
+                .cloud
+                .items
+                .iter()
+                .map(|item| ChatEntry::from_cloud(&session.user_id, item))
+                .collect();
+        }
+    }
+
+    /// UI-only merge; the parent must persist the message independently.
+    pub fn apply_cloud_message(&mut self, item: &CloudMessage) {
+        if let Some(session) = &self.cloud.session {
+            cloud_client::merge_message(&session.user_id, &mut self.cloud.items, item);
+            self.rebuild_cloud_history();
+            self.window.request_redraw();
+        }
+    }
+
+    fn reload_cloud(&mut self) {
+        let session = cloud_client::load_session();
+        let changed =
+            self.cloud.session.as_ref().map(|s| &s.user_id) != session.as_ref().map(|s| &s.user_id);
+        if changed {
+            self.cloud.reset_account();
+            self.history.clear();
+            self.input.clear();
+        }
+        if let Some(session) = session {
+            for item in cloud_client::load_cloud_history(&session) {
+                cloud_client::merge_message(&session.user_id, &mut self.cloud.items, &item);
+            }
+            self.cloud.session = Some(session);
+            self.rebuild_cloud_history();
+        }
+    }
+
     pub fn set_status(&mut self, status: impl Into<String>) {
         self.status = status.into();
         self.window.request_redraw();
     }
 
     pub fn push_message(&mut self, entry: ChatEntry) {
+        if self.cloud.session.is_some() || entry.account_id.is_some() {
+            return;
+        }
         chat::append_history(&entry);
         self.history.push(entry);
         self.window.request_redraw();
@@ -315,7 +573,20 @@ impl ChatWindow {
             self.window.request_redraw();
         }
         match event {
-            WindowEvent::CloseRequested => self.window.set_visible(false),
+            WindowEvent::CloseRequested => {
+                if self.cloud.recovery_notice.is_some() {
+                    self.cloud.status = "请先保存恢复码并确认".into();
+                    self.window.request_redraw();
+                } else {
+                    self.cloud.clear_credentials();
+                    self.window.set_visible(false);
+                }
+            }
+            WindowEvent::DroppedFile(path) => {
+                self.cloud.account_open = true;
+                self.cloud.start_import(path.clone(), self.window.clone());
+                self.window.request_redraw();
+            }
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 self.pending_size = Some(*size);
                 self.resize_deadline = Some(Instant::now() + Duration::from_millis(40));
@@ -346,6 +617,9 @@ impl ChatWindow {
 
     pub fn process_deferred_actions(&mut self) {
         let now = Instant::now();
+        if self.cloud.expire_auth(now) {
+            self.window.request_redraw();
+        }
         if self.resize_deadline.is_some_and(|deadline| now >= deadline) {
             self.window.request_redraw();
         }
@@ -369,11 +643,14 @@ impl ChatWindow {
     }
 
     fn render(&mut self) -> anyhow::Result<Vec<ChatAction>> {
+        self.cloud.expire_auth(Instant::now());
+        self.cloud.poll_import();
         let raw_input = self.state.take_egui_input(&self.window);
         let mut actions = Vec::new();
         let partner_id = self.partner_id.clone();
         let colors = Palette::new(self.dark_mode);
-        let output = self.context.run(raw_input, |ctx| {
+        let context = self.context.clone();
+        let output = context.run(raw_input, |ctx| {
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::default()
@@ -381,6 +658,24 @@ impl ChatWindow {
                         .inner_margin(16.0),
                 )
                 .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        let label = self
+                            .cloud
+                            .session
+                            .as_ref()
+                            .map_or("云账号".to_owned(), |session| {
+                                format!("云账号 · {}", session.username)
+                            });
+                        if ui.button(label).clicked() {
+                            self.cloud.account_open = !self.cloud.account_open;
+                        }
+                        if self.cloud.session.is_some() && ui.small_button("表情库").clicked() {
+                            self.cloud.account_open = true;
+                        }
+                    });
+                    if self.cloud.items.len() == cloud_client::MAX_HISTORY_ITEMS {
+                        ui.small("显示最近 100 条消息，更早记录保存在本机");
+                    }
                     if partner_id.is_none() {
                         egui::ScrollArea::vertical()
                             .id_salt("pairing-page")
@@ -572,7 +867,12 @@ impl ChatWindow {
                                         self.status = "正在更新开机自启设置...".into();
                                     }
                                     ui.add_space(8.0);
-                                    sound_controls(ui, &mut self.sounds_enabled, &mut actions);
+                                    sound_controls(
+                                        ui,
+                                        &mut self.sounds_enabled,
+                                        self.sound_theme,
+                                        &mut actions,
+                                    );
                                     ui.label(
                                         RichText::new(&self.status)
                                             .size(12.0)
@@ -694,7 +994,12 @@ impl ChatWindow {
                                         .push(ChatAction::SetLaunchAtLogin(self.startup_enabled));
                                     self.status = "正在更新开机自启设置...".into();
                                 }
-                                sound_controls(ui, &mut self.sounds_enabled, &mut actions);
+                                sound_controls(
+                                    ui,
+                                    &mut self.sounds_enabled,
+                                    self.sound_theme,
+                                    &mut actions,
+                                );
                             });
                     }
                     ui.add_space(7.0);
@@ -726,13 +1031,26 @@ impl ChatWindow {
                                     );
                                 });
                             }
-                            for entry in &self.history {
+                            for (index, entry) in self.history.iter().enumerate() {
+                                let same_minute_as_previous = index > 0
+                                    && self.history[index - 1].unix_ms / 60_000
+                                        == entry.unix_ms / 60_000;
+                                if !same_minute_as_previous {
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(
+                                            RichText::new(format_chat_time(entry.unix_ms, false))
+                                                .size(11.0)
+                                                .color(colors.muted),
+                                        );
+                                    });
+                                    ui.add_space(4.0);
+                                }
                                 let fill = if entry.outgoing {
                                     colors.outgoing
                                 } else {
                                     colors.incoming
                                 };
-                                ui.with_layout(
+                                let bubble = ui.with_layout(
                                     if entry.outgoing {
                                         egui::Layout::right_to_left(egui::Align::TOP)
                                     } else {
@@ -747,14 +1065,52 @@ impl ChatWindow {
                                                 ui.set_max_width(
                                                     (ui.available_width() * 0.78).min(290.0),
                                                 );
-                                                ui.label(
-                                                    RichText::new(&entry.text)
-                                                        .size(15.0)
-                                                        .color(colors.text),
-                                                );
+                                                if let Some(CloudMessage {
+                                                    body: CloudBody::Image { image },
+                                                    ..
+                                                }) = &entry.cloud_message
+                                                {
+                                                    self.cloud
+                                                        .textures
+                                                        .show(ui, image, 220.0, false);
+                                                } else {
+                                                    ui.label(
+                                                        RichText::new(&entry.text)
+                                                            .size(15.0)
+                                                            .color(colors.text),
+                                                    );
+                                                }
                                             });
                                     },
                                 );
+                                let response = ui.interact(
+                                    bubble.response.rect,
+                                    ui.id().with(("message-time", index)),
+                                    egui::Sense::click(),
+                                );
+                                if response.clicked() {
+                                    self.selected_time =
+                                        (self.selected_time != Some(index)).then_some(index);
+                                }
+                                if self.selected_time == Some(index) {
+                                    ui.with_layout(
+                                        if entry.outgoing {
+                                            egui::Layout::right_to_left(egui::Align::TOP)
+                                        } else {
+                                            egui::Layout::left_to_right(egui::Align::TOP)
+                                        },
+                                        |ui| {
+                                            ui.label(
+                                                RichText::new(format_chat_time(
+                                                    entry.unix_ms,
+                                                    true,
+                                                ))
+                                                .size(11.0)
+                                                .color(colors.muted),
+                                            );
+                                        },
+                                    );
+                                }
                                 ui.add_space(7.0);
                             }
                         });
@@ -808,6 +1164,9 @@ impl ChatWindow {
                             .color(colors.muted),
                     );
                 });
+
+            self.cloud
+                .show_account(ctx, partner_id.as_deref(), &self.window, &mut actions);
 
             if let Some(dialog) = self.unpair_dialog.clone() {
                 egui::Window::new("解除配对")
@@ -1070,9 +1429,865 @@ fn rounded_button(text: impl Into<egui::WidgetText>) -> egui::Button<'static> {
     egui::Button::new(text).corner_radius(egui::CornerRadius::same(10))
 }
 
-fn sound_controls(ui: &mut egui::Ui, enabled: &mut bool, actions: &mut Vec<ChatAction>) {
-    if ui.checkbox(enabled, "柔和提示音 · 拍拍和新消息").changed() {
+fn sound_controls(
+    ui: &mut egui::Ui,
+    enabled: &mut bool,
+    theme: SoundTheme,
+    actions: &mut Vec<ChatAction>,
+) {
+    if ui.checkbox(enabled, "提示音 · 拍拍和新消息").changed() {
         actions.push(ChatAction::SetSoundsEnabled(*enabled));
+    }
+    ui.horizontal_wrapped(|ui| {
+        for choice in SoundTheme::ALL {
+            if ui
+                .selectable_label(theme == choice, choice.label())
+                .clicked()
+            {
+                actions.push(ChatAction::SetSoundTheme(choice));
+            }
+        }
+    });
+}
+
+fn append_unsent_text(input: &mut String, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if !input.is_empty() && !input.ends_with('\n') {
+        input.push('\n');
+    }
+    input.push_str(text);
+}
+
+#[derive(Default)]
+struct CloudUi {
+    session: Option<Session>,
+    items: Vec<CloudMessage>,
+    stickers: Vec<CloudSticker>,
+    textures: ImageTextures,
+    account_open: bool,
+    username: String,
+    password: String,
+    recovery_input: String,
+    new_password: String,
+    auth_pending: bool,
+    auth_deadline: Option<Instant>,
+    recovery_notice: Option<String>,
+    seen_recovery: Option<String>,
+    recovery_saved: bool,
+    image_path: String,
+    sticker_name: String,
+    imported: Option<ImageData>,
+    import_worker: Option<mpsc::Receiver<Result<ImageData, String>>>,
+    outbox_pending: usize,
+    outbox_blocked: usize,
+    outbox_message: String,
+    outbox_clear_confirm: bool,
+    status: String,
+}
+
+impl CloudUi {
+    fn new() -> Self {
+        let session = cloud_client::load_session();
+        let items = session
+            .as_ref()
+            .map_or_else(Vec::new, cloud_client::load_cloud_history);
+        Self {
+            session,
+            items,
+            ..Self::default()
+        }
+    }
+
+    fn clear_credentials(&mut self) {
+        self.password.clear();
+        self.new_password.clear();
+        self.recovery_input.clear();
+    }
+
+    fn reset_account(&mut self) {
+        self.session = None;
+        self.items.clear();
+        self.stickers.clear();
+        self.textures.0.clear();
+        self.imported = None;
+        // A worker for an old account may finish, but its result is discarded.
+        self.import_worker = None;
+        self.image_path.clear();
+        self.sticker_name.clear();
+        self.username.clear();
+        self.clear_credentials();
+        self.recovery_notice = None;
+        self.seen_recovery = None;
+        self.recovery_saved = false;
+        self.auth_pending = false;
+        self.auth_deadline = None;
+        self.set_outbox_status(0, 0);
+        self.status.clear();
+    }
+
+    fn set_outbox_status(&mut self, pending: usize, blocked: usize) {
+        self.outbox_pending = pending;
+        self.outbox_blocked = blocked;
+        if pending == 0 {
+            self.outbox_clear_confirm = false;
+            self.outbox_message.clear();
+        }
+    }
+
+    fn send_rejected(&mut self, message: &str, retryable: bool) {
+        self.outbox_message = if retryable {
+            format!("消息已保留在待发送队列，将自动重试：{message}")
+        } else {
+            format!("消息已保留，待手动重试：{message}")
+        };
+    }
+
+    fn show_outbox(&mut self, ui: &mut egui::Ui, actions: &mut Vec<ChatAction>) {
+        ui.label(format!("待发送：{} 条", self.outbox_pending));
+        if self.outbox_blocked > 0 {
+            ui.label(format!("其中 {} 条待手动重试", self.outbox_blocked));
+        }
+        if !self.outbox_message.is_empty() {
+            ui.label(&self.outbox_message);
+        }
+        if self.outbox_clear_confirm {
+            ui.label(format!(
+                "确定清空 {} 条待发送消息？清空后无法恢复，也不能撤回已经提交给服务器的消息。",
+                self.outbox_pending
+            ));
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("取消清空").clicked() {
+                    self.outbox_clear_confirm = false;
+                }
+                if ui
+                    .add_enabled(self.outbox_pending > 0, egui::Button::new("确认清空"))
+                    .clicked()
+                {
+                    self.outbox_clear_confirm = false;
+                    actions.push(ChatAction::ClearOutbox);
+                }
+            });
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(self.outbox_pending > 0, egui::Button::new("重试待发送"))
+                    .clicked()
+                {
+                    actions.push(ChatAction::RetryOutbox);
+                }
+                if ui
+                    .add_enabled(self.outbox_pending > 0, egui::Button::new("清空待发送"))
+                    .clicked()
+                {
+                    self.outbox_clear_confirm = true;
+                }
+            });
+        }
+    }
+
+    fn start_import(&mut self, path: PathBuf, window: Arc<Window>) {
+        if self.session.is_none() {
+            self.status = "请先登录云账号再导入图片".into();
+            return;
+        }
+        if self.import_worker.is_some() {
+            return;
+        }
+        self.imported = None;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.import_worker = Some(receiver);
+        self.status = "正在检查图片...".into();
+        std::thread::spawn(move || {
+            let result = import_image(&path);
+            let _ = sender.send(result);
+            window.request_redraw();
+        });
+    }
+
+    fn poll_import(&mut self) {
+        let Some(receiver) = &self.import_worker else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(image)) => {
+                self.imported = Some(image);
+                self.status = "图片已就绪，可发送或保存为云表情".into();
+                self.import_worker = None;
+            }
+            Ok(Err(error)) => {
+                self.status = error;
+                self.import_worker = None;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.status = "图片导入失败，请重试".into();
+                self.import_worker = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    fn show_account(
+        &mut self,
+        ctx: &egui::Context,
+        recipient: Option<&str>,
+        window: &Arc<Window>,
+        actions: &mut Vec<ChatAction>,
+    ) {
+        if self.account_open {
+            let mut open = true;
+            egui::Window::new("云账号与表情")
+                .id(egui::Id::new("cloud-account"))
+                .open(&mut open)
+                .default_width(310.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height((ctx.screen_rect().height() - 140.0).max(180.0))
+                        .show(ui, |ui| {
+                            if let Some(session) = &self.session {
+                                ui.label(format!("已登录：{}", session.username));
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add_enabled(
+                                            !self.auth_pending && self.recovery_notice.is_none(),
+                                            egui::Button::new("退出账号"),
+                                        )
+                                        .clicked()
+                                    {
+                                        actions.push(ChatAction::Cloud(CloudRequest::Logout));
+                                        self.begin_auth();
+                                        self.status = "正在退出云账号...".into();
+                                    }
+                                    if ui.button("同步表情库").clicked() {
+                                        actions.push(ChatAction::Cloud(CloudRequest::ListStickers));
+                                    }
+                                });
+                                ui.separator();
+                                self.show_outbox(ui, actions);
+                                ui.separator();
+                                ui.label("静态 PNG / JPEG · 最大 256 KiB · 每边不超过 1024 像素");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.image_path)
+                                        .hint_text("图片路径，或把文件拖到窗口"),
+                                );
+                                if ui
+                                    .add_enabled(
+                                        self.import_worker.is_none()
+                                            && !self.image_path.trim().is_empty(),
+                                        egui::Button::new("导入图片"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.start_import(
+                                        PathBuf::from(self.image_path.trim()),
+                                        window.clone(),
+                                    );
+                                }
+                                if let Some(image) = &self.imported {
+                                    self.textures.show(ui, image, 120.0, false);
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.sticker_name)
+                                            .hint_text("表情名称"),
+                                    );
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui
+                                            .add_enabled(
+                                                !self.sticker_name.trim().is_empty(),
+                                                egui::Button::new("保存到云表情库"),
+                                            )
+                                            .clicked()
+                                        {
+                                            actions.push(ChatAction::Cloud(
+                                                CloudRequest::PutSticker {
+                                                    name: self.sticker_name.trim().to_owned(),
+                                                    image: image.clone(),
+                                                },
+                                            ));
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                recipient.is_some(),
+                                                egui::Button::new("发送图片"),
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(recipient) = recipient {
+                                                actions.push(image_message(recipient, image));
+                                            }
+                                        }
+                                    });
+                                }
+                                ui.separator();
+                                ui.label(if recipient.is_some() {
+                                    "点击表情发送"
+                                } else {
+                                    "配对后即可发送表情"
+                                });
+                                if self.stickers.is_empty() {
+                                    ui.label("表情库为空，可导入图片或同步表情库");
+                                }
+                                for sticker in &self.stickers {
+                                    ui.horizontal(|ui| {
+                                        let response = self.textures.show(
+                                            ui,
+                                            &sticker.image,
+                                            64.0,
+                                            recipient.is_some(),
+                                        );
+                                        ui.label(&sticker.name);
+                                        if response.clicked() {
+                                            if let Some(recipient) = recipient {
+                                                actions
+                                                    .push(image_message(recipient, &sticker.image));
+                                            }
+                                        }
+                                    });
+                                }
+                            } else {
+                                ui.label("登录后同步消息与表情；恢复码用于找回账号。");
+                                ui.add_enabled_ui(!self.auth_pending, |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.username)
+                                            .hint_text("用户名"),
+                                    );
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.password)
+                                            .password(true)
+                                            .hint_text("密码"),
+                                    );
+                                    let ready = !self.username.trim().is_empty()
+                                        && !self.password.is_empty();
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add_enabled(ready, egui::Button::new("登录"))
+                                            .clicked()
+                                        {
+                                            actions.push(ChatAction::Cloud(CloudRequest::Login {
+                                                username: self.username.trim().to_owned(),
+                                                password: std::mem::take(&mut self.password),
+                                                device_id: String::new(),
+                                            }));
+                                            self.begin_auth();
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                ready && !self.auth_pending,
+                                                egui::Button::new("注册"),
+                                            )
+                                            .clicked()
+                                        {
+                                            actions.push(ChatAction::Cloud(
+                                                CloudRequest::Register {
+                                                    username: self.username.trim().to_owned(),
+                                                    password: std::mem::take(&mut self.password),
+                                                    device_id: String::new(),
+                                                    legacy_token: None,
+                                                },
+                                            ));
+                                            self.begin_auth();
+                                        }
+                                    });
+                                    egui::CollapsingHeader::new("使用恢复码重置密码").show(
+                                        ui,
+                                        |ui| {
+                                            ui.add(
+                                                egui::TextEdit::singleline(
+                                                    &mut self.recovery_input,
+                                                )
+                                                .password(true)
+                                                .hint_text("恢复码"),
+                                            );
+                                            ui.add(
+                                                egui::TextEdit::singleline(&mut self.new_password)
+                                                    .password(true)
+                                                    .hint_text("新密码"),
+                                            );
+                                            if ui
+                                                .add_enabled(
+                                                    !self.username.trim().is_empty()
+                                                        && !self.recovery_input.trim().is_empty()
+                                                        && !self.new_password.is_empty(),
+                                                    egui::Button::new("恢复账号"),
+                                                )
+                                                .clicked()
+                                            {
+                                                actions.push(ChatAction::Cloud(
+                                                    CloudRequest::Recover {
+                                                        username: self.username.trim().to_owned(),
+                                                        recovery_code: std::mem::take(
+                                                            &mut self.recovery_input,
+                                                        ),
+                                                        new_password: std::mem::take(
+                                                            &mut self.new_password,
+                                                        ),
+                                                        device_id: String::new(),
+                                                    },
+                                                ));
+                                                self.begin_auth();
+                                            }
+                                        },
+                                    );
+                                });
+                            }
+                            ui.separator();
+                            ui.label(&self.status);
+                        });
+                });
+            self.account_open = open;
+            if !open {
+                self.outbox_clear_confirm = false;
+                self.clear_credentials();
+            }
+        }
+        if let Some(code) = &self.recovery_notice {
+            let mut dismiss = false;
+            egui::Modal::new(egui::Id::new("cloud-recovery-code")).show(ctx, |ui| {
+                ui.set_max_width(300.0);
+                ui.heading("请保存恢复码");
+                ui.label("恢复码只在此显示。忘记密码时需要它，请保存到安全位置。");
+                ui.label(RichText::new(code).monospace());
+                if ui.button("复制恢复码").clicked() {
+                    ui.ctx().copy_text(code.clone());
+                }
+                ui.checkbox(&mut self.recovery_saved, "我已将恢复码保存到安全位置");
+                if ui
+                    .add_enabled(self.recovery_saved, egui::Button::new("确认保存并关闭"))
+                    .clicked()
+                {
+                    dismiss = true;
+                }
+            });
+            if dismiss {
+                self.recovery_notice = None;
+            }
+        }
+    }
+
+    fn begin_auth(&mut self) {
+        self.clear_credentials();
+        self.auth_pending = true;
+        self.auth_deadline = Some(Instant::now() + Duration::from_secs(20));
+        self.status = "正在连接云账号...".into();
+    }
+
+    fn expire_auth(&mut self, now: Instant) -> bool {
+        if self.auth_deadline.is_some_and(|deadline| now >= deadline) {
+            self.auth_pending = false;
+            self.auth_deadline = None;
+            self.clear_credentials();
+            self.status = "云账号请求超时，请检查网络后重试".into();
+            return true;
+        }
+        false
+    }
+}
+
+fn image_message(recipient: &str, image: &ImageData) -> ChatAction {
+    ChatAction::Cloud(CloudRequest::SendMessage {
+        client_id: cloud_client::new_message_id(),
+        recipient_id: recipient.to_owned(),
+        body: CloudBody::Image {
+            image: image.clone(),
+        },
+    })
+}
+
+const MAX_IMAGE_BYTES: usize = 256 * 1024;
+const MAX_IMAGE_SIDE: u32 = 1024;
+const MAX_TEXTURES: usize = 32;
+
+fn import_image(path: &Path) -> Result<ImageData, String> {
+    // Reject large/nonregular files before opening; still cap reads if a file grows.
+    let metadata = fs::metadata(path).map_err(|_| "无法读取图片文件")?;
+    if !metadata.is_file() {
+        return Err("请选择普通图片文件".into());
+    }
+    if metadata.len() > MAX_IMAGE_BYTES as u64 {
+        return Err("图片超过 256 KiB".into());
+    }
+    let file = fs::File::open(path).map_err(|_| "无法打开图片文件")?;
+    let mut bytes = Vec::new();
+    file.take(MAX_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "无法读取图片文件")?;
+    let (decoded, mime) = decode_still(&bytes)?;
+    Ok(ImageData {
+        mime: mime.into(),
+        data_base64: STANDARD.encode(&bytes),
+        width: decoded.width(),
+        height: decoded.height(),
+    })
+}
+
+fn decode_still(bytes: &[u8]) -> Result<(image::DynamicImage, &'static str), String> {
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err("图片超过 256 KiB".into());
+    }
+    let format = image::guess_format(bytes).map_err(|_| "仅支持静态 PNG 或 JPEG 图片")?;
+    let mime = match format {
+        image::ImageFormat::Png => {
+            // Reject APNG even when its first frame would decode as an ordinary PNG.
+            let mut offset = 8usize;
+            while offset + 12 <= bytes.len() {
+                let length =
+                    u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                if &bytes[offset + 4..offset + 8] == b"acTL" {
+                    return Err("不支持动画 PNG，请选择静态图片".into());
+                }
+                offset = offset
+                    .checked_add(length)
+                    .and_then(|value| value.checked_add(12))
+                    .ok_or("PNG 文件无效")?;
+            }
+            "image/png"
+        }
+        image::ImageFormat::Jpeg => "image/jpeg",
+        _ => return Err("仅支持静态 PNG 或 JPEG 图片".into()),
+    };
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
+    limits.max_alloc = Some(16 * 1024 * 1024);
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|_| "图片无效或超过 1024 像素限制")?;
+    if decoded.width() == 0
+        || decoded.height() == 0
+        || decoded.width() > MAX_IMAGE_SIDE
+        || decoded.height() > MAX_IMAGE_SIDE
+    {
+        return Err("图片尺寸必须为 1 至 1024 像素".into());
+    }
+    Ok((decoded, mime))
+}
+
+fn decode_payload(image: &ImageData) -> Result<egui::ColorImage, String> {
+    if image.data_base64.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
+        return Err("图片超过大小限制".into());
+    }
+    let bytes = STANDARD
+        .decode(&image.data_base64)
+        .map_err(|_| "图片编码无效")?;
+    let (decoded, mime) = decode_still(&bytes)?;
+    if mime != image.mime || decoded.width() != image.width || decoded.height() != image.height {
+        return Err("图片尺寸或格式与声明不一致".into());
+    }
+    let thumbnail = decoded.thumbnail(256, 256).to_rgba8();
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        [thumbnail.width() as usize, thumbnail.height() as usize],
+        thumbnail.as_raw(),
+    ))
+}
+
+#[cfg(test)]
+mod cloud_ui_tests {
+    use super::*;
+
+    fn outbox_frame(
+        context: &egui::Context,
+        cloud: &mut CloudUi,
+        actions: &mut Vec<ChatAction>,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(420.0, 300.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| cloud.show_outbox(ui, actions));
+            },
+        )
+    }
+
+    fn click_outbox(
+        context: &egui::Context,
+        cloud: &mut CloudUi,
+        actions: &mut Vec<ChatAction>,
+        label: &str,
+    ) {
+        let output = outbox_frame(context, cloud, actions, Vec::new());
+        let position = output
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let egui::epaint::Shape::Text(text) = &shape.shape {
+                    if text.galley.text() == label {
+                        return Some(text.pos + text.galley.size() / 2.0);
+                    }
+                }
+                None
+            })
+            .expect("outbox button must be visible");
+        for pressed in [true, false] {
+            outbox_frame(
+                context,
+                cloud,
+                actions,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn outbox_buttons_require_pending_messages_and_explicit_clear_confirmation() {
+        let context = egui::Context::default();
+        let mut cloud = CloudUi::default();
+        let mut actions = Vec::new();
+        assert_eq!((cloud.outbox_pending, cloud.outbox_blocked), (0, 0));
+        click_outbox(&context, &mut cloud, &mut actions, "重试待发送");
+        click_outbox(&context, &mut cloud, &mut actions, "清空待发送");
+        assert!(actions.is_empty());
+        assert!(!cloud.outbox_clear_confirm);
+
+        cloud.set_outbox_status(3, 2);
+        click_outbox(&context, &mut cloud, &mut actions, "重试待发送");
+        assert!(matches!(actions.as_slice(), [ChatAction::RetryOutbox]));
+        actions.clear();
+        click_outbox(&context, &mut cloud, &mut actions, "清空待发送");
+        assert!(actions.is_empty());
+        assert!(cloud.outbox_clear_confirm);
+        click_outbox(&context, &mut cloud, &mut actions, "取消清空");
+        assert!(actions.is_empty());
+        assert!(!cloud.outbox_clear_confirm);
+
+        click_outbox(&context, &mut cloud, &mut actions, "清空待发送");
+        click_outbox(&context, &mut cloud, &mut actions, "确认清空");
+        assert!(matches!(actions.as_slice(), [ChatAction::ClearOutbox]));
+        assert!(!cloud.outbox_clear_confirm);
+        // Only the parent may change counts after actually clearing the outbox.
+        assert_eq!((cloud.outbox_pending, cloud.outbox_blocked), (3, 2));
+    }
+
+    #[test]
+    fn outbox_rejections_preserve_counts_and_authentication_state() {
+        let mut cloud = CloudUi::default();
+        cloud.set_outbox_status(2, 1);
+        cloud.auth_pending = true;
+        cloud.password = "draft password".into();
+        cloud.send_rejected("服务繁忙", true);
+        assert!(cloud.outbox_message.contains("自动重试"));
+        assert!(cloud.outbox_message.contains("服务繁忙"));
+        cloud.send_rejected("配对关系已变更", false);
+        assert!(cloud.outbox_message.contains("待手动重试"));
+        assert!(cloud.outbox_message.contains("配对关系已变更"));
+        assert_eq!((cloud.outbox_pending, cloud.outbox_blocked), (2, 1));
+        assert!(cloud.auth_pending);
+        assert_eq!(cloud.password, "draft password");
+        cloud.outbox_clear_confirm = true;
+        cloud.set_outbox_status(0, 0);
+        assert!(!cloud.outbox_clear_confirm);
+        assert!(cloud.outbox_message.is_empty());
+    }
+
+    #[test]
+    fn unsent_text_restoration_preserves_new_drafts() {
+        for (draft, text, expected) in [
+            ("", "未发送内容", "未发送内容"),
+            ("新草稿", "未发送内容", "新草稿\n未发送内容"),
+            ("新草稿\n", "未发送内容", "新草稿\n未发送内容"),
+            ("新草稿", "", "新草稿"),
+        ] {
+            let mut input = draft.to_owned();
+            append_unsent_text(&mut input, text);
+            assert_eq!(input, expected);
+        }
+    }
+
+    fn encoded_image(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
+        let image = image::DynamicImage::new_rgb8(width, height);
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, format).unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn auth_timeout_unlocks_controls_and_clears_all_credentials() {
+        let mut cloud = CloudUi::default();
+        cloud.password = "password".into();
+        cloud.recovery_input = "recovery".into();
+        cloud.new_password = "new password".into();
+        cloud.begin_auth();
+        let deadline = cloud.auth_deadline.unwrap();
+        assert!(
+            cloud.password.is_empty()
+                && cloud.new_password.is_empty()
+                && cloud.recovery_input.is_empty()
+        );
+        assert!(!cloud.expire_auth(deadline - Duration::from_millis(1)));
+        assert!(cloud.auth_pending);
+        assert!(cloud.expire_auth(deadline));
+        assert!(!cloud.auth_pending);
+        assert!(cloud.auth_deadline.is_none());
+        assert!(!cloud.expire_auth(deadline + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn account_reset_discards_history_secrets_media_and_late_imports() {
+        let mut cloud = CloudUi::default();
+        cloud.session = Some(Session {
+            user_id: "alice".into(),
+            username: "Alice".into(),
+            token: "secret".into(),
+            server_url: "wss://example.test/ws".into(),
+        });
+        cloud.items.push(CloudMessage {
+            seq: 1,
+            client_id: "client".into(),
+            sender_id: "alice".into(),
+            recipient_id: "bob".into(),
+            body: CloudBody::Text {
+                text: "private".into(),
+            },
+            unix_ms: 1,
+        });
+        let image = ImageData {
+            mime: "image/png".into(),
+            data_base64: String::new(),
+            width: 1,
+            height: 1,
+        };
+        cloud.stickers.push(CloudSticker {
+            id: "sticker".into(),
+            name: "Private".into(),
+            image: image.clone(),
+        });
+        cloud.imported = Some(image.clone());
+        cloud.recovery_notice = Some("recovery secret".into());
+        cloud.password = "password".into();
+        cloud.textures.0.push_back(([0; 32], None));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        cloud.import_worker = Some(receiver);
+        cloud.set_outbox_status(2, 1);
+        cloud.outbox_clear_confirm = true;
+        cloud.send_rejected("暂时不可发送", false);
+        cloud.reset_account();
+        assert!(sender.send(Ok(image)).is_err());
+        cloud.poll_import();
+        assert!(cloud.session.is_none());
+        assert!(cloud.items.is_empty() && cloud.stickers.is_empty() && cloud.textures.0.is_empty());
+        assert!(cloud.imported.is_none() && cloud.recovery_notice.is_none());
+        assert!(cloud.password.is_empty());
+        assert_eq!((cloud.outbox_pending, cloud.outbox_blocked), (0, 0));
+        assert!(!cloud.outbox_clear_confirm);
+        assert!(cloud.outbox_message.is_empty());
+    }
+
+    #[test]
+    fn png_and_jpeg_decode_and_thumbnail_with_declared_metadata() {
+        for (format, mime) in [
+            (image::ImageFormat::Png, "image/png"),
+            (image::ImageFormat::Jpeg, "image/jpeg"),
+        ] {
+            let bytes = encoded_image(512, 256, format);
+            let mut payload = ImageData {
+                mime: mime.into(),
+                data_base64: STANDARD.encode(bytes),
+                width: 512,
+                height: 256,
+            };
+            assert_eq!(decode_payload(&payload).unwrap().size, [256, 128]);
+            payload.width = 513;
+            assert!(decode_payload(&payload).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_animated_malformed_and_unsupported_images() {
+        assert!(decode_still(&vec![0; MAX_IMAGE_BYTES + 1]).is_err());
+        assert!(decode_still(&encoded_image(1025, 1, image::ImageFormat::Png)).is_err());
+        assert!(decode_still(b"GIF89a\x01\x00\x01\x00").is_err());
+        assert!(decode_still(b"not an image").is_err());
+        let mut animation = b"\x89PNG\r\n\x1a\n".to_vec();
+        animation.extend_from_slice(b"\x00\x00\x00\x00acTL\x00\x00\x00\x00");
+        assert!(decode_still(&animation).unwrap_err().contains("动画"));
+        let payload = ImageData {
+            mime: "image/png".into(),
+            data_base64: "A".repeat(MAX_IMAGE_BYTES.div_ceil(3) * 4 + 1),
+            width: 1,
+            height: 1,
+        };
+        assert!(decode_payload(&payload).is_err());
+    }
+}
+
+#[derive(Default)]
+struct ImageTextures(VecDeque<([u8; 32], Option<egui::TextureHandle>)>);
+
+impl ImageTextures {
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        image: &ImageData,
+        edge: f32,
+        clickable: bool,
+    ) -> egui::Response {
+        let width = image.width.clamp(1, MAX_IMAGE_SIDE) as f32;
+        let height = image.height.clamp(1, MAX_IMAGE_SIDE) as f32;
+        let scale = (edge.min(ui.available_width()) / width.max(height)).min(1.0);
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(width * scale, height * scale),
+            if clickable {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            },
+        );
+        if !ui.is_rect_visible(rect) {
+            return response;
+        }
+        let mut hash = Sha256::new();
+        hash.update(image.mime.as_bytes());
+        hash.update(image.width.to_le_bytes());
+        hash.update(image.height.to_le_bytes());
+        hash.update(image.data_base64.as_bytes());
+        let key: [u8; 32] = hash.finalize().into();
+        let cached = if let Some(index) = self.0.iter().position(|entry| entry.0 == key) {
+            self.0.remove(index).unwrap()
+        } else {
+            let texture = decode_payload(image).ok().map(|pixels| {
+                ui.ctx()
+                    .load_texture("cloud-image", pixels, egui::TextureOptions::LINEAR)
+            });
+            (key, texture)
+        };
+        if let Some(texture) = &cached.1 {
+            ui.painter().image(
+                texture.id(),
+                rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "图片无效",
+                egui::FontId::proportional(12.0),
+                ui.visuals().text_color(),
+            );
+        }
+        self.0.push_back(cached);
+        if self.0.len() > MAX_TEXTURES {
+            self.0.pop_front();
+        }
+        response
     }
 }
 

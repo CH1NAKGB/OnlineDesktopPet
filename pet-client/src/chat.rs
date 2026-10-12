@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use shared_protocol::cloud::{CloudBody, CloudMessage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatEntry {
@@ -13,6 +14,12 @@ pub struct ChatEntry {
     pub sender: String,
     pub text: String,
     pub unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_message: Option<CloudMessage>,
 }
 
 impl ChatEntry {
@@ -25,6 +32,24 @@ impl ChatEntry {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
+            account_id: None,
+            seq: None,
+            cloud_message: None,
+        }
+    }
+
+    pub fn from_cloud(account_id: &str, item: &CloudMessage) -> Self {
+        Self {
+            outgoing: item.sender_id == account_id,
+            sender: item.sender_id.clone(),
+            text: match &item.body {
+                CloudBody::Text { text } => text.clone(),
+                CloudBody::Image { .. } => String::new(),
+            },
+            unix_ms: item.unix_ms,
+            account_id: Some(account_id.to_owned()),
+            seq: Some(item.seq),
+            cloud_message: Some(item.clone()),
         }
     }
 }
@@ -43,6 +68,10 @@ pub fn load_history() -> Vec<ChatEntry> {
 }
 
 pub fn append_history(entry: &ChatEntry) {
+    // Cloud data belongs exclusively in the account-scoped store.
+    if entry.account_id.is_some() || entry.cloud_message.is_some() {
+        return;
+    }
     let Some(path) = history_path() else {
         return;
     };
@@ -54,6 +83,22 @@ pub fn append_history(entry: &ChatEntry) {
     };
     if let Ok(json) = serde_json::to_string(entry) {
         let _ = writeln!(file, "{json}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_entries_still_deserialize() {
+        let entry: ChatEntry = serde_json::from_str(
+            r#"{"outgoing":false,"sender":"friend","text":"hello","unix_ms":42}"#,
+        )
+        .unwrap();
+        assert!(entry.account_id.is_none());
+        assert!(entry.seq.is_none());
+        assert!(entry.cloud_message.is_none());
     }
 }
 

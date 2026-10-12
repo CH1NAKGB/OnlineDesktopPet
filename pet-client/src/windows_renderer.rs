@@ -144,9 +144,9 @@ impl Renderer {
                 );
                 let alpha = color[3].clamp(0.0, 1.0);
                 let offset = ((y * self.width + x) * 4) as usize;
-                pixels[offset] = (color[2].clamp(0.0, 1.0) * 255.0) as u8;
-                pixels[offset + 1] = (color[1].clamp(0.0, 1.0) * 255.0) as u8;
-                pixels[offset + 2] = (color[0].clamp(0.0, 1.0) * 255.0) as u8;
+                pixels[offset] = (color[2].clamp(0.0, 1.0) * alpha * 255.0) as u8;
+                pixels[offset + 1] = (color[1].clamp(0.0, 1.0) * alpha * 255.0) as u8;
+                pixels[offset + 2] = (color[0].clamp(0.0, 1.0) * alpha * 255.0) as u8;
                 pixels[offset + 3] = (alpha * 255.0) as u8;
             }
         }

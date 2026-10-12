@@ -1,0 +1,32 @@
+[Unit]
+Description=Chick Link isolated preview TLS proxy
+After=network.target chicklink-relay-test.service
+Requires=chicklink-relay-test.service
+
+[Service]
+Type=simple
+User=chicktest
+Group=chicktest
+WorkingDirectory=/opt/chicklink-test
+Environment=HOME=/opt/chicklink-test/state
+Environment=XDG_DATA_HOME=/opt/chicklink-test/state/data
+Environment=XDG_CONFIG_HOME=/opt/chicklink-test/state/config
+Environment=GOMEMLIMIT=64MiB
+Environment=GOMAXPROCS=1
+ExecStart=/opt/chicklink-test/bin/caddy run --config /opt/chicklink-test/config/Caddyfile --adapter caddyfile
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+MemoryAccounting=true
+MemoryLimit=96M
+CPUAccounting=true
+CPUQuota=10%
+Nice=10
+LimitNOFILE=1024
+
+# Intentionally not enabled at boot; this preview is temporary.

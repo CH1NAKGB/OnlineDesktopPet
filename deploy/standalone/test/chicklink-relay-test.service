@@ -1,0 +1,35 @@
+[Unit]
+Description=Chick Link isolated preview relay
+After=network.target
+
+[Service]
+Type=simple
+User=chicktest
+Group=chicktest
+WorkingDirectory=/opt/chicklink-test
+Environment=BIND_ADDR=127.0.0.1:18081
+Environment=LAN_DISCOVERY=false
+Environment=RELAY_REQUIRE_ENCRYPTION=true
+Environment=RELAY_REQUIRE_PROVISIONED_TOKENS=true
+Environment=RELAY_RSA_PRIVATE_KEY_PATH=/opt/chicklink-test/secrets/relay-private.pem
+Environment=RELAY_ACCESS_TOKENS_PATH=/opt/chicklink-test/secrets/access-tokens.json
+Environment=RELAY_STATE_PATH=/opt/chicklink-test/state/relationships.json
+Environment=RELAY_CLOUD_DB=/opt/chicklink-test/state/cloud.sqlite3
+Environment=RELAY_CLOUD_KEY_PATH=/opt/chicklink-test/secrets/cloud-storage.key
+ExecStart=/opt/chicklink-test/bin/relay-server
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+MemoryAccounting=true
+MemoryLimit=128M
+CPUAccounting=true
+CPUQuota=20%
+Nice=10
+LimitNOFILE=1024
+
+# Intentionally not enabled at boot; this preview is temporary.

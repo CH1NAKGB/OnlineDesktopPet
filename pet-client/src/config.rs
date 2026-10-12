@@ -1,6 +1,11 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use crate::sound::SoundTheme;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,7 +90,6 @@ fn validate_connection(settings: &ConnectionSettings) -> anyhow::Result<()> {
             && url.password().is_none(),
         "中继地址必须为 ws:// 或 wss://，且不能包含登录凭据"
     );
-    anyhow::ensure!(!settings.access_token.trim().is_empty(), "个人令牌不能为空");
     Ok(())
 }
 
@@ -132,9 +136,8 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             relay_url: std::env::var("CHICK_RELAY_URL")
-                .unwrap_or_else(|_| "ws://127.0.0.1:8080/ws".into()),
-            access_token: std::env::var("CHICK_ACCESS_TOKEN")
-                .unwrap_or_else(|_| "dev:chick-user".into()),
+                .unwrap_or_else(|_| "wss://pet.narendra.cn:18443/ws".into()),
+            access_token: std::env::var("CHICK_ACCESS_TOKEN").unwrap_or_default(),
             device_id: std::env::var("CHICK_DEVICE_ID").unwrap_or_else(|_| "local-desktop".into()),
             partner_id: std::env::var("CHICK_PARTNER_ID").ok(),
             pairing_code: std::env::var("CHICK_PAIRING_CODE")
@@ -144,7 +147,7 @@ impl Default for ClientConfig {
                 .and_then(|name| shared_protocol::normalize_display_name(&name))
                 .or_else(load_display_name)
                 .unwrap_or_else(|| "小鸡主人".into()),
-            discover_lan_relay: true,
+            discover_lan_relay: false,
             tls_ca_cert_path: std::env::var_os("CHICK_TLS_CA_CERT_PATH").map(PathBuf::from),
             server_rsa_public_key_path: std::env::var_os("CHICK_SERVER_RSA_PUBLIC_KEY_PATH")
                 .map(PathBuf::from),
@@ -176,6 +179,93 @@ pub fn save_sounds_enabled(enabled: bool) -> std::io::Result<()> {
         root.join("sounds-enabled.txt"),
         if enabled { "true" } else { "false" },
     )
+}
+
+pub fn sound_theme() -> SoundTheme {
+    app_data_root()
+        .map(|root| load_sound_theme_at(&root))
+        .unwrap_or_default()
+}
+
+pub fn save_sound_theme(theme: SoundTheme) -> std::io::Result<()> {
+    let root = app_data_root().ok_or_else(|| std::io::Error::other("无法确定设置目录"))?;
+    save_sound_theme_at(&root, theme)
+}
+
+fn load_sound_theme_at(root: &Path) -> SoundTheme {
+    fs::read_to_string(root.join("sound-theme.txt"))
+        .map(|value| SoundTheme::from_setting(&value))
+        .unwrap_or_default()
+}
+
+fn save_sound_theme_at(root: &Path, theme: SoundTheme) -> std::io::Result<()> {
+    fs::create_dir_all(root)?;
+    fs::write(root.join("sound-theme.txt"), theme.setting())
+}
+
+#[cfg(test)]
+mod sound_theme_tests {
+    use super::*;
+
+    struct SettingsDir(PathBuf);
+
+    impl SettingsDir {
+        fn new() -> Self {
+            Self(
+                std::env::temp_dir()
+                    .join(format!("chicklink-sound-test-{}", rand::random::<u128>())),
+            )
+        }
+    }
+
+    impl Drop for SettingsDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn every_theme_round_trips_without_changing_mute_setting() {
+        let root = SettingsDir::new();
+        for theme in SoundTheme::ALL {
+            save_sound_theme_at(&root.0, theme).unwrap();
+            assert_eq!(load_sound_theme_at(&root.0), theme);
+            assert_eq!(
+                fs::read_to_string(root.0.join("sound-theme.txt")).unwrap(),
+                theme.setting()
+            );
+            fs::write(root.0.join("sounds-enabled.txt"), "false").unwrap();
+            save_sound_theme_at(&root.0, theme).unwrap();
+            assert_eq!(
+                fs::read_to_string(root.0.join("sounds-enabled.txt")).unwrap(),
+                "false"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_or_invalid_theme_defaults_to_soft() {
+        let root = SettingsDir::new();
+        assert_eq!(load_sound_theme_at(&root.0), SoundTheme::Soft);
+        fs::create_dir_all(&root.0).unwrap();
+        for value in ["", "unknown", "soft"] {
+            fs::write(root.0.join("sound-theme.txt"), value).unwrap();
+            assert_eq!(load_sound_theme_at(&root.0), SoundTheme::Soft);
+        }
+        fs::write(root.0.join("sound-theme.txt"), b"\xff").unwrap();
+        assert_eq!(load_sound_theme_at(&root.0), SoundTheme::Soft);
+        fs::write(root.0.join("sound-theme.txt"), " chirp\n").unwrap();
+        assert_eq!(load_sound_theme_at(&root.0), SoundTheme::Chirp);
+    }
+
+    #[test]
+    fn saving_theme_reports_io_failure() {
+        let root = SettingsDir::new();
+        fs::create_dir_all(&root.0).unwrap();
+        let blocked = root.0.join("file");
+        fs::write(&blocked, "not a directory").unwrap();
+        assert!(save_sound_theme_at(&blocked, SoundTheme::Bell).is_err());
+    }
 }
 
 fn load_display_name() -> Option<String> {

@@ -1,5 +1,5 @@
 # Art Assets
 
-`chick-concept.png` is an original generated concept image for the default chicken theme. It is intentionally not wired into the client yet: this source image has no alpha channel, so it must be exported as a true transparent sprite sheet before use in the transparent desktop window.
+Chick Link renders its original desktop chicken with native vector-style drawing in the macOS shader and Windows layered-window renderer. Shared fonts and their licenses are stored in `pet-client/assets/fonts/`.
 
-Do not use assets from Stardew Valley or other games in the application or release package. The final theme should retain only the broad original direction: a warm, pixel-art farm chicken.
+Do not include assets copied from Stardew Valley, Minecraft, or other games. The art may use a broad cozy pixel-art direction, but all shipped character pixels must remain original.

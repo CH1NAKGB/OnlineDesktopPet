@@ -1,9 +1,29 @@
 # Chick Link
 
-一个面向 macOS 与 Windows 的轻量联机桌宠原型。桌宠主窗口使用原生窗口事件循环；中继服务采用 WebSocket，消息协议从第一天开始独立版本化。
+Chick Link 是一个面向 macOS 与 Windows 的轻量联机桌宠：两个人共养一只小鸡，可拖动、抚摸、聊天和查看对方状态。小鸡会偶尔在桌面散步。
 
-当前版本：[v0.3.3](https://github.com/CH1NAKGB/OnlineDesktopPet/releases/tag/v0.3.3)。
+客户端使用 Rust 原生窗口和 wgpu，不依赖 WebView；活动时按显示器刷新率调度，空闲时降低唤醒频率。macOS 与 Windows 共用协议和核心交互逻辑。
+
+GitHub 最新公开稳定版：[v0.3.4](https://github.com/CH1NAKGB/OnlineDesktopPet/releases/tag/v0.3.4)。当前源代码包含尚未发布的 Chick Link 更新。
 新对话或新开发者先读 [offread.md 接手文档](offread.md)；部署直接看 [快速部署](deploy/QUICKSTART.md)，客户端验收看 [测试说明](packaging/TESTING.md)。
+
+> 状态边界：当前工作区包含尚未发布的账号、恢复码、云端加密历史、云表情和本机待发送队列开发改动。这些改动尚未替换线上服务，线上账号库目前也未启用。GitHub Release v0.3.4 仍是可下载稳定版。
+
+## 已有功能
+
+- macOS / Windows 透明桌宠窗口，支持拖动、抚摸、换肤和低频桌面走动。
+- 配对码配对，配对成功双方都会收到反馈；解除配对需要双方确认。
+- 独立聊天窗口、快捷回复、本地历史、正文气泡和 DPI 自适应。
+- 在线、离线、暂离、网络质量和 RTT 显示。
+- 柔和拍拍音效和消息音效，可选择音色并关闭声音。
+- macOS LaunchAgent / Windows 当前用户 Run 项开机自启。
+- 局域网 mDNS 搜索，未发现时回退到公网中继。
+
+## 开发中的账号线
+
+未发布开发线已经完成本地协议、存储和回环联机测试，包含用户名密码、一次性恢复码、多设备登录、加密 SQLite 聊天历史、PNG/JPEG 表情库、离线同步和持久待发送队列。服务端数据库加密不是端到端加密，服务端仍能在处理请求时解密内容；启用前请阅读 [云账号部署说明](deploy/standalone/CLOUD-ACCOUNTS.md)。
+
+当前工作区需要重新完成回归；真机视觉验收和正式发布包验收仍需单独完成。
 
 ## 当前结构
 
@@ -11,7 +31,7 @@
 pet-client/       原生桌宠、聊天 UI；macOS wgpu / Windows layered-window 渲染
 relay-server/     WebSocket 在线与点对点消息中继
 shared-protocol/  两端共享的序列化事件
-assets/           原创小鸡概念资源与导出要求
+pet-client/assets/ 字体与共享资源
 ```
 
 ## 开发启动
@@ -23,7 +43,7 @@ cargo run -p relay-server
 cargo run -p pet-client
 ```
 
-客户端默认回退到 `ws://127.0.0.1:8080/ws`，开发身份是 `dev:chick-user`。两个客户端使用不同的 `dev:<name>` 并配对后即可互发事件。此模式仅用于本地/可信 LAN；公网测试使用强制加密和随机令牌的直连部署。认证站与短期 JWT 尚未实现。
+客户端默认连接配置的正式中继地址。启动本地测试时，请同时设置 `CHICK_RELAY_URL=ws://127.0.0.1:8080/ws` 与不同的 `CHICK_ACCESS_TOKEN=dev:<name>`；该开发身份模式仅用于本机或可信局域网。
 
 如果改为 `wss://`，客户端默认信任系统证书。没有公网域名时，也可以通过 `CHICK_TLS_CA_CERT_PATH=/path/to/ca-or-cert.pem` 额外信任一份 PEM 证书或私有 CA 链。
 
@@ -33,21 +53,21 @@ cargo run -p pet-client
 - 空闲状态：50ms 唤醒一次，约 20FPS，减少透明桌宠的 GPU/CPU 开销。
 - 动画逻辑必须使用时间差，不应把角色速度绑定到 60 或 120 FPS。
 
-桌宠目前以程序化原创小鸡绘制到透明窗口，主渲染链路不经过 WebView。两端共享呼吸、眨眼和抚摸渐变参数。60/120Hz 动画一致性单测不等于所有硬件都能实测跑满；精灵资源包和逐像素命中仍是后续方向。
+桌宠使用原生透明窗口渲染，不经过 WebView；小鸡会在桌面范围内低频随机走动。60/120Hz 动画一致性已有逻辑测试，但不等于所有硬件都已实测跑满。
 
 左键拖动会使用系统原生窗口移动；快速轻点小鸡会触发短暂的开心跳动。按 `Esc` 可退出测试窗口。
 
 ## 共同宠物与交互
 
-一只小鸡由两位主人共同操作。macOS 与 Windows 都可以右键小鸡显示原生交互菜单，提供轻拍、换肤、配对/聊天和退出等操作。Windows 桌宠不会显示在任务栏，并改用 `UpdateLayeredWindow` 与预乘逐像素 Alpha 渲染，不再依赖容易产生黑底或黑边的颜色键。
+一只小鸡由两位主人共同操作。macOS 与 Windows 都可以右键小鸡显示原生交互菜单，提供抚摸、换肤、配对/聊天和退出等操作。Windows 桌宠不会显示在任务栏，并使用 `UpdateLayeredWindow` 与预乘逐像素 Alpha 渲染。
 
 客户端每三秒测量一次 RTT，并在 macOS 菜单、Windows 托盘菜单和桌宠右键菜单中显示连接质量；短暂断线后会自动重连。每台端侧首次运行会生成并持久化 8 位配对码，连接中继后上报码值并查重。任意一端在“配对 / 聊天”中输入对方配对码后，服务端会原子绑定双方；发起端和接收端都会自动打开聊天、显示成功提示，无需另一端重复输入。只有已配对双方能互发消息、状态与共同宠物操作：
 
 ```bash
-CHICK_ACCESS_TOKEN=dev:owner-a cargo run -p pet-client
+CHICK_RELAY_URL=ws://127.0.0.1:8080/ws CHICK_ACCESS_TOKEN=dev:owner-a cargo run -p pet-client
 ```
 
-另一台电脑使用 `CHICK_ACCESS_TOKEN=dev:owner-b`，并把 `CHICK_RELAY_URL` 指向同一个中继即可验证同步。当前中继的配对关系仍保存在内存中，服务重启后需要重新配对。“配对 / 聊天”会打开独立非透明 egui 窗口，提供本机配对码、历史气泡列表、快捷回复和多行发送区；历史以 JSONL 保存在用户应用数据目录。解除共同小鸡关系必须由发起方先确认，再由另一位主人确认，服务端收到双方确认前仍保持原配对关系。设置区还可选择开机自启：macOS 使用当前用户的 LaunchAgent，Windows 使用当前用户的注册表 Run 项，均无需管理员权限。收到在线文本时还会在桌宠上方显示 8 秒气泡，Windows 气泡和桌宠会随系统 DPI 动态缩放。表情、图片上传和云端离线历史仍属于后续媒体/数据库阶段。
+另一台电脑使用 `CHICK_ACCESS_TOKEN=dev:owner-b`，并把 `CHICK_RELAY_URL` 指向同一个中继即可验证同步。正式专用中继会持久化配对关系；“配对 / 聊天”会打开独立非透明 egui 窗口，提供本机配对码、历史气泡列表、快捷回复和多行发送区。未发布账号线还提供云端账号、图片表情、离线历史和本机待发送队列。解除共同养鸡关系必须由发起方先确认，再由另一位主人确认。设置区还可选择开机自启：macOS 使用当前用户的 LaunchAgent，Windows 使用当前用户的注册表 Run 项，均无需管理员权限。收到在线文本时会在桌宠上方显示正文气泡，Windows 气泡和桌宠会随系统 DPI 动态缩放。
 
 ## 局域网联机与搜索
 

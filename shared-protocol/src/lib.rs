@@ -1,5 +1,7 @@
 //! Versioned messages exchanged between the desktop client and the relay.
 
+pub mod cloud;
+
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, OsRng, rand_core::RngCore},
@@ -113,6 +115,9 @@ pub fn decrypt_session_key(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientEvent {
+    Cloud {
+        request: cloud::CloudRequest,
+    },
     Hello {
         protocol_version: u16,
         access_token: String,
@@ -153,6 +158,9 @@ pub enum ClientEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    Cloud {
+        response: cloud::CloudResponse,
+    },
     Ready {
         user_id: String,
     },
