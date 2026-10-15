@@ -18,6 +18,8 @@ struct ConnectionSettings {
     server_rsa_public_key_path: Option<PathBuf>,
     #[serde(default)]
     tls_ca_cert_path: Option<PathBuf>,
+    #[serde(default)]
+    update_url: Option<String>,
 }
 
 impl ClientConfig {
@@ -50,6 +52,11 @@ impl ClientConfig {
                 config.access_token = settings.access_token;
             }
             config.discover_lan_relay = settings.discover_lan_relay;
+            if std::env::var_os("CHICK_UPDATE_URL").is_none() {
+                if let Some(url) = settings.update_url {
+                    config.update_url = url;
+                }
+            }
             let base = path.parent().unwrap_or(std::path::Path::new("."));
             if std::env::var_os("CHICK_SERVER_RSA_PUBLIC_KEY_PATH").is_none() {
                 config.server_rsa_public_key_path = settings
@@ -78,6 +85,7 @@ impl ClientConfig {
             );
         }
         validate_discovery_security(&config)?;
+        validate_update_url(&config.update_url)?;
         Ok(config)
     }
 }
@@ -98,6 +106,17 @@ fn validate_connection(settings: &ConnectionSettings) -> anyhow::Result<()> {
             && url.username().is_empty()
             && url.password().is_none(),
         "中继地址必须为 ws:// 或 wss://，且不能包含登录凭据"
+    );
+    Ok(())
+}
+
+fn validate_update_url(value: &str) -> anyhow::Result<()> {
+    let url = url::Url::parse(value).map_err(|_| anyhow::anyhow!("更新地址无效"))?;
+    anyhow::ensure!(
+        url.scheme() == "https"
+            || (url.scheme() == "http"
+                && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))),
+        "更新地址必须使用 HTTPS；仅本机测试允许 HTTP"
     );
     Ok(())
 }
@@ -148,6 +167,7 @@ pub struct ClientConfig {
     pub server_rsa_public_key_path: Option<PathBuf>,
     /// The setting is opt-in and is shown in the UI before any activity is sent.
     pub share_active_app: bool,
+    pub update_url: String,
 }
 
 impl Default for ClientConfig {
@@ -170,6 +190,8 @@ impl Default for ClientConfig {
             server_rsa_public_key_path: std::env::var_os("CHICK_SERVER_RSA_PUBLIC_KEY_PATH")
                 .map(PathBuf::from),
             share_active_app: false,
+            update_url: std::env::var("CHICK_UPDATE_URL")
+                .unwrap_or_else(|_| crate::update::DEFAULT_URL.into()),
         }
     }
 }

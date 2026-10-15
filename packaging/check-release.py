@@ -33,6 +33,7 @@ def known_private_tokens() -> tuple[bytes, ...]:
 def main() -> None:
     tokens = known_private_tokens()
     archives = (
+        DIST / f"ChickLink-macos-universal-v{VERSION}.zip",
         DIST / f"ChickLink-server-docker-source-v{VERSION}.zip",
         DIST / f"ChickLink-windows-x64-v{VERSION}.zip",
     )

@@ -10,9 +10,11 @@ mod lan_discovery;
 mod outbox;
 #[cfg(not(target_os = "windows"))]
 mod renderer;
+mod self_update;
 mod single_instance;
 mod sound;
 mod startup;
+mod update;
 mod window_position;
 #[cfg(target_os = "windows")]
 mod windows_renderer;
@@ -103,9 +105,12 @@ enum NetworkEvent {
     },
     Error(String),
     Disconnected,
+    UpdateChecked(Result<Option<update::Release>, String>),
+    UpdateProgress(u64, Option<u64>),
+    UpdateInstalled(Result<(), String>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct EventSender {
     sender: mpsc::Sender<NetworkEvent>,
     wake: winit::event_loop::EventLoopProxy<()>,
@@ -535,6 +540,14 @@ struct PetApp {
     bubble: Option<(String, Instant)>,
     // Keep this across reconnect attempts so a persistent configuration error is shown once.
     security_warning_bubble: Option<String>,
+    update_url: String,
+    update_sender: EventSender,
+    update_check_at: Instant,
+    update_check_started: bool,
+    update_check_running: bool,
+    update_install_running: bool,
+    update_exit_pending: bool,
+    update_result: Option<Result<Option<update::Release>, String>>,
     pet_position: PositionRecorder,
     chat_window: Option<ChatWindow>,
     open_chat_on_start: bool,
@@ -558,6 +571,8 @@ impl PetApp {
         pairing_code: String,
         display_name: String,
         open_chat_on_start: bool,
+        update_url: String,
+        update_sender: EventSender,
     ) -> Self {
         Self {
             cloud_user: None,
@@ -580,6 +595,14 @@ impl PetApp {
             pairing_code,
             bubble: None,
             security_warning_bubble: None,
+            update_url,
+            update_sender,
+            update_check_at: Instant::now() + Duration::from_secs(30),
+            update_check_started: false,
+            update_check_running: false,
+            update_install_running: false,
+            update_exit_pending: false,
+            update_result: None,
             pet_position: PositionRecorder::new(WindowKind::Pet),
             chat_window: None,
             open_chat_on_start,
@@ -649,6 +672,22 @@ impl PetApp {
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
+    }
+
+    fn start_update_check(&mut self) {
+        if self.update_check_running {
+            return;
+        }
+        self.update_check_running = true;
+        update::mark_checked();
+        if let Some(chat) = self.chat_window.as_mut() {
+            chat.set_update_checking();
+        }
+        let url = self.update_url.clone();
+        let sender = self.update_sender.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(NetworkEvent::UpdateChecked(update::check(&url)));
+        });
     }
 
     fn clear_security_warning(&mut self) {
@@ -737,7 +776,12 @@ impl PetApp {
                 self.display_name.clone(),
                 self.network_label(),
             )) {
-                Ok(window) => self.chat_window = Some(window),
+                Ok(mut window) => {
+                    if let Some(result) = self.update_result.clone() {
+                        window.set_update_result(result);
+                    }
+                    self.chat_window = Some(window);
+                }
                 Err(error) => {
                     eprintln!("chat window error: {error:#}");
                     return;
@@ -757,6 +801,80 @@ impl PetApp {
     fn handle_chat_actions(&mut self, actions: Vec<ChatAction>) {
         for action in actions {
             match action {
+                ChatAction::CheckForUpdates => self.start_update_check(),
+                ChatAction::SetUpdateCheckEnabled(enabled) => {
+                    let error = update::set_enabled(enabled).err().map(|e| e.to_string());
+                    if let Some(chat) = self.chat_window.as_mut() {
+                        chat.finish_update_setting(enabled, error);
+                    }
+                }
+                ChatAction::OpenReleasePage => {
+                    if let Some(chat) = self.chat_window.as_ref() {
+                        if let Some(url) = chat.update_page_url() {
+                            let _ = update::open_page(url);
+                        }
+                    }
+                }
+                ChatAction::InstallUpdate => {
+                    if self.update_install_running {
+                        continue;
+                    }
+                    let Some(release) = self
+                        .update_result
+                        .as_ref()
+                        .and_then(|r| r.as_ref().ok())
+                        .and_then(|r| r.as_ref())
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    let can_install = release.asset.as_ref().is_some_and(|asset| {
+                        #[cfg(target_os = "macos")]
+                        {
+                            asset.name.ends_with(".zip")
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            asset.name.ends_with(".exe")
+                        }
+                        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                        {
+                            let _ = asset;
+                            false
+                        }
+                    });
+                    if !can_install {
+                        continue;
+                    }
+                    if let Err(error) = self_update::preflight() {
+                        if let Some(chat) = self.chat_window.as_mut() {
+                            chat.set_update_status(error);
+                        }
+                        let _ = update::open_page(&release.page_url);
+                        continue;
+                    }
+                    self.update_install_running = true;
+                    if let Some(chat) = self.chat_window.as_mut() {
+                        chat.set_update_status("正在下载更新…".into());
+                    }
+                    let sender = self.update_sender.clone();
+                    let source = self.update_url.clone();
+                    std::thread::spawn(move || {
+                        let result = update::download_verified(&release, &source, |done, total| {
+                            let _ = sender.send(NetworkEvent::UpdateProgress(done, total));
+                        })
+                        .and_then(|path| {
+                            let result = self_update::install(&path);
+                            if result.is_err() {
+                                if let Some(dir) = path.parent() {
+                                    let _ = std::fs::remove_dir_all(dir);
+                                }
+                            }
+                            result
+                        });
+                        let _ = sender.send(NetworkEvent::UpdateInstalled(result));
+                    });
+                }
                 ChatAction::Cloud(request) => {
                     self.submit_cloud_request(request);
                 }
@@ -990,6 +1108,8 @@ impl ApplicationHandler for PetApp {
         self.update_frame_rate(&window);
         self.window = Some(window.clone());
         #[cfg(target_os = "macos")]
+        self_update::clean_successful_backup();
+        #[cfg(target_os = "macos")]
         {
             self.menu = Some(PetMenu::new(self.partner_id.as_deref()));
         }
@@ -1121,9 +1241,20 @@ impl ApplicationHandler for PetApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.update_exit_pending {
+            self.pet_position.flush();
+            event_loop.exit();
+            return;
+        }
         let Some(window) = self.window.clone() else {
             return;
         };
+        if !self.update_check_started && Instant::now() >= self.update_check_at {
+            self.update_check_started = true;
+            if update::auto_check_due() {
+                self.start_update_check();
+            }
+        }
         self.pet_position.flush_if_due(Instant::now());
         if let (Some(monitor), Ok(position)) = (window.current_monitor(), window.outer_position()) {
             let screen = monitor.size();
@@ -1366,6 +1497,49 @@ impl ApplicationHandler for PetApp {
                         chat_window.set_status(message);
                     }
                 }
+                NetworkEvent::UpdateChecked(result) => {
+                    self.update_check_running = false;
+                    if let Ok(Some(release)) = &result {
+                        update::remember_latest(&release.version);
+                        if update::should_notify(&release.version) {
+                            self.show_bubble(
+                                format!("发现新版本 {}", release.version),
+                                Duration::from_secs(8),
+                            );
+                            update::mark_notified(&release.version);
+                        }
+                    }
+                    if let Some(chat) = self.chat_window.as_mut() {
+                        chat.set_update_result(result.clone());
+                    }
+                    self.update_result = Some(result);
+                }
+                NetworkEvent::UpdateProgress(done, total) => {
+                    if let Some(chat) = self.chat_window.as_mut() {
+                        let label = total.map_or_else(
+                            || format!("已下载 {} MB", done / 1_000_000),
+                            |total| {
+                                format!("已下载 {} / {} MB", done / 1_000_000, total / 1_000_000)
+                            },
+                        );
+                        chat.set_update_status(label);
+                    }
+                }
+                NetworkEvent::UpdateInstalled(result) => {
+                    self.update_install_running = false;
+                    match result {
+                        Ok(()) => {
+                            self.update_exit_pending = true;
+                        }
+                        Err(error) => {
+                            if let Some(chat) = self.chat_window.as_mut() {
+                                chat.set_update_status(format!(
+                                    "更新失败：{error}。可打开发布页手动安装"
+                                ));
+                            }
+                        }
+                    }
+                }
             }
             self.update_network_labels();
         }
@@ -1397,6 +1571,11 @@ impl ApplicationHandler for PetApp {
             .as_ref()
             .and_then(ChatWindow::position_deadline)
             .map_or(next_wake, |deadline| next_wake.min(deadline));
+        let next_wake = if self.update_check_started {
+            next_wake
+        } else {
+            next_wake.min(self.update_check_at)
+        };
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_wake));
     }
 }
@@ -1449,6 +1628,8 @@ fn main() -> anyhow::Result<()> {
         sender: events_tx,
         wake: event_loop.create_proxy(),
     };
+    let update_url = config.update_url.clone();
+    let update_sender = sender.clone();
     std::thread::spawn(move || network::run(config, sender, commands_rx));
     event_loop.run_app(&mut PetApp::new(
         events_rx,
@@ -1457,6 +1638,8 @@ fn main() -> anyhow::Result<()> {
         pairing_code,
         display_name,
         open_chat_on_start,
+        update_url,
+        update_sender,
     ))?;
     Ok(())
 }

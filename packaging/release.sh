@@ -16,7 +16,17 @@ cargo build --locked --release -p pet-client --target x86_64-pc-windows-gnu
 
 APP="$STAGE/macos/Chick Link.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/font-licenses" "$STAGE/windows/font-licenses" dist
-cp packaging/macos/Info.plist "$APP/Contents/Info.plist"
+python3 - "$VERSION" "$APP/Contents/Info.plist" <<'PY'
+import plistlib
+import sys
+
+with open("packaging/macos/Info.plist", "rb") as source:
+    plist = plistlib.load(source)
+plist["CFBundleShortVersionString"] = sys.argv[1]
+plist["CFBundleVersion"] = sys.argv[1]
+with open(sys.argv[2], "wb") as target:
+    plistlib.dump(plist, target)
+PY
 lipo -create target/aarch64-apple-darwin/release/pet-client \
     target/x86_64-apple-darwin/release/pet-client -output "$APP/Contents/MacOS/Chick Link"
 cp pet-client/assets/fonts/LICENSE.txt pet-client/assets/fonts/AUTHORS.txt \
@@ -26,6 +36,8 @@ ln -s /Applications "$STAGE/macos/Applications"
 xattr -cr "$APP"
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
+(cd "$STAGE/macos" && ditto -c -k --keepParent "Chick Link.app" "$STAGE/macos.zip")
+cp "$STAGE/macos.zip" "dist/ChickLink-macos-universal-v$VERSION.zip"
 hdiutil create -volname "Chick Link $VERSION" -srcfolder "$STAGE/macos" \
     -ov -format UDZO "dist/ChickLink-macos-universal-v$VERSION.dmg"
 
@@ -39,6 +51,7 @@ cp target/x86_64-pc-windows-gnu/release/pet-client.exe "dist/ChickLink-windows-x
 python3 packaging/build-server-source.py "$STAGE/server.zip"
 cp "$STAGE/server.zip" "dist/ChickLink-server-docker-source-v$VERSION.zip"
 shasum -a 256 "dist/ChickLink-macos-universal-v$VERSION.dmg" \
+    "dist/ChickLink-macos-universal-v$VERSION.zip" \
     "dist/ChickLink-windows-x64-v$VERSION.exe" \
     "dist/ChickLink-windows-x64-v$VERSION.zip" \
     "dist/ChickLink-server-docker-source-v$VERSION.zip" > "dist/SHA256SUMS-v$VERSION.txt"

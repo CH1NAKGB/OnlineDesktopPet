@@ -43,6 +43,10 @@ pub enum ChatAction {
     SetLaunchAtLogin(bool),
     SetSoundsEnabled(bool),
     SetSoundTheme(SoundTheme),
+    CheckForUpdates,
+    SetUpdateCheckEnabled(bool),
+    OpenReleasePage,
+    InstallUpdate,
     Cloud(CloudRequest),
     RetryOutbox,
     ClearOutbox,
@@ -144,6 +148,9 @@ pub struct ChatWindow {
     startup_enabled: bool,
     sounds_enabled: bool,
     sound_theme: SoundTheme,
+    update_enabled: bool,
+    update_status: String,
+    update_release: Option<crate::update::Release>,
     cloud: CloudUi,
     focus_pair_input: bool,
     focus_deadline: Option<Instant>,
@@ -265,6 +272,9 @@ impl ChatWindow {
             startup_enabled: crate::startup::is_enabled(),
             sounds_enabled: crate::config::sounds_enabled(),
             sound_theme: crate::config::sound_theme(),
+            update_enabled: crate::update::enabled(),
+            update_status: format!("当前版本 {}", env!("CARGO_PKG_VERSION")),
+            update_release: None,
             cloud,
             focus_pair_input: true,
             focus_deadline: None,
@@ -412,6 +422,45 @@ impl ChatWindow {
             |error| format!("无法保存音效设置：{error}"),
         );
         self.window.request_redraw();
+    }
+
+    pub fn set_update_checking(&mut self) {
+        self.update_status = "正在检查更新…".into();
+        self.window.request_redraw();
+    }
+
+    pub fn set_update_result(&mut self, result: Result<Option<crate::update::Release>, String>) {
+        match result {
+            Ok(Some(release)) => {
+                self.update_status = format!("发现新版本 {}", release.version);
+                self.update_release = Some(release);
+            }
+            Ok(None) => {
+                self.update_status = "当前已是最新版本".into();
+                self.update_release = None;
+            }
+            Err(_) => self.update_status = "检查失败，可稍后重试".into(),
+        }
+        self.window.request_redraw();
+    }
+
+    pub fn set_update_status(&mut self, status: String) {
+        self.update_status = status;
+        self.window.request_redraw();
+    }
+
+    pub fn finish_update_setting(&mut self, enabled: bool, error: Option<String>) {
+        self.update_enabled = if error.is_some() { !enabled } else { enabled };
+        if let Some(error) = error {
+            self.update_status = format!("无法保存更新设置：{error}");
+        }
+        self.window.request_redraw();
+    }
+
+    pub fn update_page_url(&self) -> Option<&str> {
+        self.update_release
+            .as_ref()
+            .map(|release| release.page_url.as_str())
     }
 
     /// Parent persists all responses before forwarding them here, even when no window exists.
@@ -891,6 +940,13 @@ impl ChatWindow {
                                         self.sound_theme,
                                         &mut actions,
                                     );
+                                    update_controls(
+                                        ui,
+                                        &mut self.update_enabled,
+                                        &self.update_status,
+                                        self.update_release.as_ref(),
+                                        &mut actions,
+                                    );
                                     ui.label(
                                         RichText::new(&self.status)
                                             .size(12.0)
@@ -1016,6 +1072,13 @@ impl ChatWindow {
                                     ui,
                                     &mut self.sounds_enabled,
                                     self.sound_theme,
+                                    &mut actions,
+                                );
+                                update_controls(
+                                    ui,
+                                    &mut self.update_enabled,
+                                    &self.update_status,
+                                    self.update_release.as_ref(),
                                     &mut actions,
                                 );
                             });
@@ -1468,6 +1531,54 @@ fn sound_controls(
     });
 }
 
+fn update_controls(
+    ui: &mut egui::Ui,
+    enabled: &mut bool,
+    status: &str,
+    release: Option<&crate::update::Release>,
+    actions: &mut Vec<ChatAction>,
+) {
+    ui.separator();
+    ui.label(format!("更新 · 当前版本 {}", env!("CARGO_PKG_VERSION")));
+    if ui.checkbox(enabled, "自动检查更新（仅提示）").changed() {
+        actions.push(ChatAction::SetUpdateCheckEnabled(*enabled));
+    }
+    if ui.button("检查更新").clicked() {
+        actions.push(ChatAction::CheckForUpdates);
+    }
+    ui.small(status);
+    if let Some(release) = release {
+        ui.label(format!("可用版本 {}", release.version));
+        let can_install = release.asset.as_ref().is_some_and(|asset| {
+            #[cfg(target_os = "macos")]
+            {
+                asset.name.ends_with(".zip")
+            }
+            #[cfg(target_os = "windows")]
+            {
+                asset.name.ends_with(".exe")
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                let _ = asset;
+                false
+            }
+        });
+        if can_install && ui.button("立即更新").clicked() {
+            actions.push(ChatAction::InstallUpdate);
+        }
+        if ui.button("打开发布页").clicked() {
+            actions.push(ChatAction::OpenReleasePage);
+        }
+        #[cfg(target_os = "macos")]
+        if can_install {
+            ui.small(
+                "应用内更新只校验 SHA-256；旧版本需要手动安装一次。首次安装建议从发布页下载。",
+            );
+        }
+    }
+}
+
 fn append_unsent_text(input: &mut String, text: &str) {
     if text.is_empty() {
         return;
@@ -1668,6 +1779,7 @@ impl CloudUi {
                                 ui.visuals().warn_fg_color,
                                 "云端可读取消息；本机消息、待发送内容和登录状态目前保存在未加密文件中。",
                             );
+                            ui.small("检查更新会向配置的更新源（默认 GitHub）发起请求，不发送账号令牌、设备标识或聊天内容。");
                             ui.separator();
                             if let Some(session) = &self.session {
                                 ui.label(format!("已登录：{}", session.username));
