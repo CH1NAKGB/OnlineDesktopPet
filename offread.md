@@ -5,6 +5,7 @@
 
 ## 2026-10-15 当前接手要点
 
+- P0-3 监控代码提交 `161034a` 已推送，但**未验收、未启用定时检查**。隔离中继在 `127.0.0.1:19090` 验证 `/healthz=ok`、`/version=0.3.4`；生产只读探测得到 TLS 到期 **2027-01-13 09:50:43 UTC**（当时约 89.9 天）、`/healthz=ok`、`/version=404`。GitHub 仓库尚无 `CHICKLINK_MONITOR_ENABLED` 和 `CHICKLINK_EXPECTED_VERSION` 变量，cron job 会跳过。模拟故障 [run 38735470529](https://github.com/CH1NAKGB/OnlineDesktopPet/actions/runs/38735470529) 按预期失败，告警步骤成功创建 [Issue #1](https://github.com/CH1NAKGB/OnlineDesktopPet/issues/1)；所有者通知 API 返回该 Issue 的 `reason=mention`、`unread=true`，随后已关闭测试 Issue。真正的 TLS/健康/版本三项定时验收仍须在备份完成并安全部署 `/version` 后进行。
 - A1/A3 修复提交 `ba47b3b`：三分钟接手和受版本管理的部署/包装文档已改为线上证书 **2027-01-13 09:50:43 UTC**、timer 每日 04:00/16:00 检查，旧日期均标为历史或本机旧副本。客户端对持续的 RSA/握手配置错误只弹一次气泡，重连期间继续更新聊天状态栏；收到正常连接或账号认证后清除警告。已通过格式、编译和自动回归；气泡行为尚未做真实窗口复现。`dist/private-v0.3.4/windows/RELEASE-0.3.4.md` 与 `dist/cloud-20260912/windows/CLOUD-TEST.md` 是被忽略的旧发布包快照，保留原文，不将私用分发目录纳入 Git。
 - A2 镜像 CI 已真实触发：[`relay-image.yml` 第 2 次运行](https://github.com/CH1NAKGB/OnlineDesktopPet/actions/runs/38732339784)，run ID `38732339784`，结果 success；tag 校验成功，产物名 `relay-linux-x64-v0.3.4`。`actions/checkout@v4` 当前对该 tag 的浅克隆足以让 `git describe --exact-match --tags HEAD` 通过，因此未增加 fetch-depth。
 - 2026-10-15 独立复跑：`cargo fmt --all --check`、`cargo check --workspace --locked`、`cargo test --workspace --locked`、`cargo check -p pet-client --target x86_64-pc-windows-gnu --locked`、`sh deploy/tests/relay-smoke.sh` 均通过；客户端 42 通过/1 忽略，中继 27 通过，协议 9 通过。smoke 使用假 Docker，不等于真实容器验收。`block v0.1.6` future-incompat 警告仍在。
