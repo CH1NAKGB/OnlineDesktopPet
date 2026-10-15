@@ -692,7 +692,6 @@ impl PetApp {
             return;
         }
         self.update_check_running = true;
-        update::mark_checked();
         if let Some(chat) = self.chat_window.as_mut() {
             chat.set_update_checking();
         }
@@ -1043,7 +1042,10 @@ impl PetApp {
                     self.apply_shared_action(SharedPetAction::SetSkin { skin }, true)
                 }
                 Some(MenuAction::Chat) => self.open_chat(event_loop),
-                Some(MenuAction::Quit) => event_loop.exit(),
+                Some(MenuAction::Quit) => {
+                    self.pet_position.flush();
+                    event_loop.exit();
+                }
                 None => {}
             }
         }
@@ -1073,7 +1075,10 @@ impl PetApp {
                         window.focus_window();
                     }
                 }
-                Some(TrayAction::Quit) => event_loop.exit(),
+                Some(TrayAction::Quit) => {
+                    self.pet_position.flush();
+                    event_loop.exit();
+                }
                 None => {}
             }
         }
@@ -1171,7 +1176,10 @@ impl ApplicationHandler for PetApp {
                         ..
                     },
                 ..
-            } => event_loop.exit(),
+            } => {
+                self.pet_position.flush();
+                event_loop.exit();
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -1223,9 +1231,7 @@ impl ApplicationHandler for PetApp {
             }
             WindowEvent::Moved(position) => {
                 self.update_frame_rate(&window);
-                if self.dragging {
-                    self.pet_position.moved(position);
-                }
+                self.pet_position.moved(position, window.scale_factor());
             }
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
@@ -1291,7 +1297,9 @@ impl ApplicationHandler for PetApp {
                 window.scale_factor(),
                 self.dragging || window.is_visible() == Some(false),
             ) {
-                window.set_outer_position(winit::dpi::PhysicalPosition::new(x, position.y));
+                let target = winit::dpi::PhysicalPosition::new(x, position.y);
+                self.pet_position.note_wander_move(target);
+                window.set_outer_position(target);
             }
             if self.wander.frame() != before {
                 window.request_redraw();
@@ -1522,8 +1530,8 @@ impl ApplicationHandler for PetApp {
                 }
                 NetworkEvent::UpdateChecked(result) => {
                     self.update_check_running = false;
+                    update::record_check_result(&result);
                     if let Ok(Some(release)) = &result {
-                        update::remember_latest(&release.version);
                         if update::should_notify(&release.version) {
                             self.show_bubble(
                                 format!("发现新版本 {}", release.version),

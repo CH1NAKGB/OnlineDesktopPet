@@ -115,11 +115,13 @@
   聊天窗口创建时（[chat_window.rs:169](pet-client/src/chat_window.rs#L169)）只设尺寸、不设位置。
 - **动作**：
   - 沿用 `config.rs` 已有的 `*.txt` 设置写法（与 `sounds-enabled.txt`、`sound-theme.txt` 同一套机制），
-    新增 `pet-window-position.txt` 与 `chat-window-position.txt`，格式 `x,y`（物理像素）；
-  - 桌宠窗口在 `WindowEvent::Moved` 后**去抖**写入（拖动过程中不要每帧写盘）；
+    新增 `pet-window-position.txt` 与 `chat-window-position.txt`，格式 `x,y,scale`；
+    旧 `x,y` 文件按 `scale=1.0` 兼容读取；
+  - 桌宠窗口在非漫游的 `WindowEvent::Moved` 后**去抖**写入；系统移动也记录，漫游移动不记录；
   - 聊天窗口创建时读回位置，并在其 `Moved` 事件同样去抖写入；
   - 启动恢复时按当前显示器集合**钳制**回可见区域：拔掉副屏、改分辨率、改缩放后不能跑到屏幕外；
-  - 保存物理坐标，恢复时按目标显示器 `scale_factor` 换算，避免不同缩放下错位。
+  - 用保存时的 scale 将物理坐标换成逻辑坐标来选屏，再按当前显示器 scale 换回物理坐标并钳制；
+  - 退出时 flush 待写位置，`Drop` 兜底，避免最后 350 ms 的移动丢失。
 - **验收标准**：拖到副屏角落 → 退出 → 重启位置保持；拔掉副屏后启动仍在可见区域；
   100%/200% 缩放下换算正确；桌宠与聊天窗口各自独立记忆。
 - **说明**：**不含按像素命中测试**（透明像素不响应点击需自研 `WM_NCHITTEST` + alpha 判断，
@@ -200,16 +202,18 @@
   **仅远端更大才提示**；忽略 draft/prerelease。
 - **平台挑包**：Windows 优先 `ChickLink-Setup-v<ver>.exe`，其次 windows-x64 zip；
   macOS 优先 `ChickLink-macos-universal-v<ver>.zip`（自更新用），DMG 作为回退；找不到则回退 `html_url`。
-- **节流与缓存**（沿用 `*.txt` 写法）：启动后**延迟 30 秒**检查一次，此后每 24 小时最多一次；
+- **节流与缓存**（沿用 `*.txt` 写法）：启动后**延迟 30 秒**检查一次，仅成功检查后 24 小时节流；
+  失败不写成功时间，下次启动仍会重试；
   设置页提供手动"检查更新"。文件：`update-check-enabled.txt`（默认开启）、
-  `update-last-check.txt`（unix ms）、`update-latest-version.txt`、`update-notified-version.txt`。
+  `update-last-check.txt`（unix ms）、`update-notified-version.txt`；旧版从未读取的
+  `update-latest-version.txt` 在下次成功检查时清理。
 - **UI**：设置页"更新"区域含当前版本 / 检查按钮 / "发现新版本 a.b.c" /
   "立即更新"（仅 macOS）与"打开发布页"；打开链接 macOS 用 `open`，
   Windows 用 `ShellExecuteW`（`windows-sys` 加 `Win32_UI_Shell`）。
   新版本**只提示一次**（复用 `security_warning_bubble` 的一次性模式，[main.rs:650](pet-client/src/main.rs#L650)/[1342](pet-client/src/main.rs#L1342)）。
 - **验收标准**：启动 30 秒内不发请求；第二次启动因节流不发第二次请求；
   远端版本更大才提示且只提示一次；`draft`/`prerelease`/更旧版本不提示；
-  请求失败不阻塞主线程、不弹崩溃提示；抓包确认不含 token 与聊天内容。
+  请求失败不阻塞主线程、不弹崩溃提示且不占用 24 小时节流；抓包确认不含 token 与聊天内容。
 
 ### M0-6 macOS 应用内自更新（路线 B）
 

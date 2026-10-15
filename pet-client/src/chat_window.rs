@@ -652,7 +652,9 @@ impl ChatWindow {
                 self.pending_size = Some(*size);
                 self.resize_deadline = Some(Instant::now() + Duration::from_millis(40));
             }
-            WindowEvent::Moved(position) => self.position.moved(*position),
+            WindowEvent::Moved(position) => {
+                self.position.moved(*position, self.window.scale_factor())
+            }
             WindowEvent::ThemeChanged(theme) => {
                 self.dark_mode = matches!(theme, Theme::Dark);
                 configure_style(&self.context, self.dark_mode);

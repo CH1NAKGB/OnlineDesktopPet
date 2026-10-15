@@ -341,12 +341,21 @@ fn due_since(last: Option<u64>, now: u64) -> bool {
     last.is_none_or(|last| now.saturating_sub(last) >= CHECK_INTERVAL_MS)
 }
 
-pub fn mark_checked() {
-    let _ = write_setting("update-last-check.txt", &now_ms().to_string());
+fn record_result_at(root: &std::path::Path, success: bool, now: u64) -> io::Result<()> {
+    if !success {
+        return Ok(());
+    }
+    fs::create_dir_all(root)?;
+    fs::write(root.join("update-last-check.txt"), now.to_string())?;
+    // This old cache was never read. Retire it when a valid check completes.
+    let _ = fs::remove_file(root.join("update-latest-version.txt"));
+    Ok(())
 }
 
-pub fn remember_latest(version: &str) {
-    let _ = write_setting("update-latest-version.txt", version);
+pub fn record_check_result(result: &Result<Option<Release>, String>) {
+    if let Some(root) = settings_root() {
+        let _ = record_result_at(&root, result.is_ok(), now_ms());
+    }
 }
 
 pub fn should_notify(version: &str) -> bool {
@@ -456,6 +465,25 @@ mod tests {
             false
         ));
         assert!(!allowed_download_url("http://127.0.0.1:12/a", false));
+    }
+
+    #[test]
+    fn successful_check_throttles_but_failure_retries() {
+        let root =
+            std::env::temp_dir().join(format!("chicklink-throttle-{:x}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("update-latest-version.txt"), "stale").unwrap();
+        record_result_at(&root, false, 100).unwrap();
+        assert!(!root.join("update-last-check.txt").exists());
+        assert!(due_since(None, 101));
+        record_result_at(&root, true, 200).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("update-last-check.txt")).unwrap(),
+            "200"
+        );
+        assert!(!due_since(Some(200), 201));
+        assert!(!root.join("update-latest-version.txt").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
