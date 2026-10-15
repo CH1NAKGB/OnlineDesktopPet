@@ -5,8 +5,9 @@
 
 ## 2026-10-15 当前接手要点
 
-- v0.4 路线图 P0-1 回归：`cargo fmt --all --check`、`cargo check --workspace --locked`、`cargo test --workspace --locked`、Windows GNU 目标 `cargo check`、`sh deploy/tests/relay-smoke.sh` 均通过。测试结果为客户端 42 通过/1 项真实音频设备测试忽略、中继 27 通过、协议 9 通过。双 RSA 私钥隔离中继测试让旧公钥与新公钥客户端分别握手并双向发送事件；无加密通道下注册、登录、恢复、Resume 在发送前被拒绝。实际启动测试：`CHICK_DISCOVER_LAN=true` 且无公钥以“LAN 自动发现需要预置中继 RSA 公钥”退出。账号连接缺 RSA 时聊天状态栏与桌宠气泡提示错误。沙盒内回环端口测试需允许本机监听；`block v0.1.6` future-incompat 警告仍在。部署 smoke 仅用假 Docker 验证命令连接，未验证真实容器运行。
+- v0.4 路线图 P0-1 已由提交 `b74b1c7e1984c79240c28d51120a5c95220bae97` 固定。回归：`cargo fmt --all --check`、`cargo check --workspace --locked`、`cargo test --workspace --locked`、Windows GNU 目标 `cargo check`、`sh deploy/tests/relay-smoke.sh` 均通过。测试结果为客户端 42 通过/1 项真实音频设备测试忽略、中继 27 通过、协议 9 通过。双 RSA 私钥隔离中继测试让旧公钥与新公钥客户端分别握手并双向发送事件；无加密通道下注册、登录、恢复、Resume 在发送前被拒绝。实际启动测试：`CHICK_DISCOVER_LAN=true` 且无公钥以“LAN 自动发现需要预置中继 RSA 公钥”退出。账号连接缺 RSA 时聊天状态栏与桌宠气泡提示错误。沙盒内回环端口测试需允许本机监听；`block v0.1.6` future-incompat 警告仍在。部署 smoke 仅用假 Docker 验证命令连接，未验证真实容器运行。
 - `0.3.3` 文档检索结果仅保留历史版本记录：`offread.md`、`ROADMAP-v0.4.md`、`deploy/centos7.md`、`deploy/QUICKSTART.md`、`deploy/standalone/README.md`、`packaging/LAN-TEST.md`、`packaging/TESTING.md`、`third_party/open_source_candidates/INTEGRATION_CHECKLIST.md`。当前工作流、脚本、Compose 版本均取 v0.3.4。
+- P0-2 备份验收清单已写入 `deploy/standalone/BACKUP-RUNBOOK.md`。桌面副本仍是未加密同机临时副本；用户将自行加密，离线介质、密文解密恢复、业务登录/配对演练及新 ACME 凭据备份尚未完成。生产云库尚未启用，无生产云历史可恢复。此项不得标为已验收。
 
 - 本轮修改开始前，`main` 与 `origin/main` 同步；提交 `74d3add` 已公开。此后以实时 `git status` 和 `git log` 为准，不能沿用下文旧的“未提交改动”判断。
 - 2026-10-15 已修复证书续期：服务器 ACME 出站恢复、staging DNS-01 成功、生产新证书已切换；外部验证线上证书到期 **2027-01-13 09:50:43 UTC**，HTTPS 健康检查通过。`chicklink-cert-renew.timer` 已启用，每天 04:00 和 16:00 检查；当日手动重跑确认未到续期窗口时不重新签发或重启 TLS。旧的本机证书副本仍于 2026-12-10 到期，不要把它当作线上现状。
