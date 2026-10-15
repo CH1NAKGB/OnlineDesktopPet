@@ -49,8 +49,8 @@ journalctl -u chicklink-relay -u chicklink-tls --since today
 
 - 服务器私密文件在 /opt/chicklink/secrets，root:chicklink 0640，目录 0750。
 - 本机 deploy/secrets/aliyun 为独立云端身份；与 LAN 密钥、令牌不同。不要上传 GitHub 或整个同步 NAS。
-- 证书本机路径 deploy/secrets/acme/config/live/pet.narendra.cn，**有效期至 2026-12-10 13:06:55 UTC**。
-- **自动续期未配置**：首次采用 Certbot 手动 DNS 验证；后续需要单独的最小 DNS 授权或到期前手动重新签发。不能将 Caddy 进程运行中误认为会自动续期。
+- 当时本机旧副本位于 deploy/secrets/acme/config/live/pet.narendra.cn，**有效期至 2026-12-10 13:06:55 UTC**；这不是 2026-10-15 已续期的线上证书。
+- **当时自动续期未配置**：首次采用 Certbot 手动 DNS 验证。（已过时；2026-10-15 的线上签发和 timer 验收见本文件顶部。）
 - 新版通过 RELAY_STATE_PATH=/opt/chicklink/state/relationships.json 保存双向配对表，配对/解除成功前先原子落盘，重启后读取；文件损坏时拒绝启动，不悄悄清空。旧内存版首次升级可能需要重新配对一次。
 - 持久化范围仅为已确认的配对关系；在线状态、昵称缓存、配对码和待确认解除请求不落盘。重启后待确认请求需重新发起，客户端重新上报昵称与配对码；聊天历史保留在各端。
 - upgrade-state.sh 仅更新桌宠中继和专用 unit，保留旧版程序及 unit 并在健康失败时回滚；备份在 /opt/chicklink/backups。

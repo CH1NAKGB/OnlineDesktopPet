@@ -46,4 +46,4 @@ curl -4 -sS --connect-timeout 8 --max-time 15 -o /dev/null \
 4. 验收生产签发、专用 TLS 切换、失败回滚和未到期时不重启。
 5. 最后才安装并启用 chicklink-cert-renew.timer。
 
-当前生产续期脚本及 timer 仍未部署；线上证书有效至 2026-12-10。
+2026-09-14 工单提交时，生产续期脚本及 timer 尚未部署，旧证书有效至 2026-12-10。（已过时，见 2026-10-15 的 [README.md](README.md)）

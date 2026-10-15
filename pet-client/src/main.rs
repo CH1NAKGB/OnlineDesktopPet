@@ -530,6 +530,8 @@ struct PetApp {
     display_name: String,
     pairing_code: String,
     bubble: Option<(String, Instant)>,
+    // Keep this across reconnect attempts so a persistent configuration error is shown once.
+    security_warning_bubble: Option<String>,
     chat_window: Option<ChatWindow>,
     open_chat_on_start: bool,
     latency_ms: Option<u32>,
@@ -573,6 +575,7 @@ impl PetApp {
             display_name,
             pairing_code,
             bubble: None,
+            security_warning_bubble: None,
             chat_window: None,
             open_chat_on_start,
             latency_ms: None,
@@ -640,6 +643,25 @@ impl PetApp {
         self.pacer.activate();
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
+        }
+    }
+
+    fn clear_security_warning(&mut self) {
+        let Some(warning) = self.security_warning_bubble.take() else {
+            return;
+        };
+        if self
+            .bubble
+            .as_ref()
+            .is_some_and(|(text, _)| text == &warning)
+        {
+            self.bubble = None;
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
+        if let Some(chat_window) = self.chat_window.as_mut() {
+            chat_window.set_status("连接已恢复");
         }
     }
 
@@ -1118,6 +1140,9 @@ impl ApplicationHandler for PetApp {
                 }
                 NetworkEvent::Cloud(response) => {
                     use shared_protocol::cloud::{CloudBody, CloudResponse};
+                    if matches!(&response, CloudResponse::Authenticated { .. }) {
+                        self.clear_security_warning();
+                    }
                     match &response {
                         CloudResponse::Authenticated { user_id, .. } => {
                             self.cloud_user = Some(user_id.clone())
@@ -1167,6 +1192,7 @@ impl ApplicationHandler for PetApp {
                     self.latency_ms = None;
                 }
                 NetworkEvent::Connected => {
+                    self.clear_security_warning();
                     self.network_connected = true;
                     self.latency_ms = None;
                 }
@@ -1312,8 +1338,11 @@ impl ApplicationHandler for PetApp {
                     }
                 }
                 NetworkEvent::Error(message) => {
-                    if message.contains("RSA 加密") || message.contains("加密握手") {
+                    if (message.contains("RSA 加密") || message.contains("加密握手"))
+                        && self.security_warning_bubble.is_none()
+                    {
                         self.show_bubble(message.clone(), Duration::from_secs(10));
+                        self.security_warning_bubble = Some(message.clone());
                     }
                     if let Some(chat_window) = self.chat_window.as_mut() {
                         chat_window.set_status(message);
