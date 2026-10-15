@@ -10,6 +10,7 @@ mod lan_discovery;
 mod outbox;
 #[cfg(not(target_os = "windows"))]
 mod renderer;
+mod single_instance;
 mod sound;
 mod startup;
 #[cfg(target_os = "windows")]
@@ -1399,6 +1400,13 @@ fn skin_to_uniform(skin: PetSkin) -> f32 {
 }
 
 fn main() -> anyhow::Result<()> {
+    let _instance_guard = match single_instance::acquire()? {
+        Some(guard) => guard,
+        None => {
+            eprintln!("Chick Link is already running; exiting second instance");
+            std::process::exit(10);
+        }
+    };
     let config = ClientConfig::load()?;
     let (events_tx, events_rx) = mpsc::channel();
     let partner_id = config.partner_id.clone();

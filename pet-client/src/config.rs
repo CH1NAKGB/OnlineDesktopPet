@@ -321,7 +321,7 @@ fn pairing_code_path() -> Option<PathBuf> {
     Some(app_data_root()?.join("pairing-code.txt"))
 }
 
-fn app_data_root() -> Option<PathBuf> {
+pub(crate) fn app_data_root() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     let root = std::env::var_os("APPDATA").map(PathBuf::from);
     #[cfg(target_os = "macos")]
