@@ -293,6 +293,7 @@
 | A1 | 证书现状文档纠偏 | 已验收 | `ba47b3b` + offread 日期检索说明 |
 | A2 | 镜像 CI tag 与产物验收 | 已验收 | [run 38732339784](https://github.com/CH1NAKGB/OnlineDesktopPet/actions/runs/38732339784)，产物 `relay-linux-x64-v0.3.4` |
 | A3 | RSA 错误气泡只提示一次 | 未验收 | `ba47b3b` + 回归通过；真实窗口复现待做 |
+| SEC-1 | 公开发布附件泄露修复 | 未验收 | v0.3.4 原服务端源码 ZIP 已撤下并替换；新 SHA-256 `2949c92a6805070a0773a01016a9595887fb9de81b653a3c3f7be1f8830577b4`；LAN 测试凭据已在本机轮换，CI 与公开下载复核待做 |
 | P0-1 | 验收并提交未提交修复 | 已验收 | `b74b1c7` + offread 回归摘要 |
 | P0-2 | 备份与恢复演练 | 进行中 | [BACKUP-RUNBOOK](deploy/standalone/BACKUP-RUNBOOK.md) + offread；离线密文恢复未完成 |
 | P0-3 | 监控与告警 | 未验收 | `161034a`；[模拟故障 run 38735470529](https://github.com/CH1NAKGB/OnlineDesktopPet/actions/runs/38735470529) + [Issue #1](https://github.com/CH1NAKGB/OnlineDesktopPet/issues/1) 及 mention 通知；线上 `/version` 仍为 404，cron 未启用 |

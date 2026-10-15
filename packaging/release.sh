@@ -34,12 +34,11 @@ cp pet-client/assets/fonts/LICENSE.txt pet-client/assets/fonts/AUTHORS.txt \
 (cd "$STAGE/windows"; zip -qr "$STAGE/windows.zip" .)
 cp "$STAGE/windows.zip" "dist/ChickLink-windows-x64-v$VERSION.zip"
 cp target/x86_64-pc-windows-gnu/release/pet-client.exe "dist/ChickLink-windows-x64-v$VERSION.exe"
-zip -qr "$STAGE/server.zip" Cargo.toml Cargo.lock README.md .dockerignore \
-    shared-protocol relay-server pet-client deploy \
-    -x '*/target/*' 'deploy/secrets/*' 'deploy/.env' '*.DS_Store'
+python3 packaging/build-server-source.py "$STAGE/server.zip"
 cp "$STAGE/server.zip" "dist/ChickLink-server-docker-source-v$VERSION.zip"
 shasum -a 256 "dist/ChickLink-macos-universal-v$VERSION.dmg" \
     "dist/ChickLink-windows-x64-v$VERSION.exe" \
     "dist/ChickLink-windows-x64-v$VERSION.zip" \
     "dist/ChickLink-server-docker-source-v$VERSION.zip" > "dist/SHA256SUMS-v$VERSION.txt"
+python3 packaging/check-release.py
 echo "Release assets ready in dist/"

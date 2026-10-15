@@ -1,24 +1,49 @@
-"""Verify public release archives do not contain private connection artifacts."""
+"""Verify public v0.3.4 archives do not contain private connection artifacts."""
+
 import json
 from pathlib import Path
-import zipfile
 
-root = Path(__file__).resolve().parents[1]
-tokens = [json.loads((root / "dist/cloud-20260912" / role /
-                      "chicklink-connection.json").read_text())["access_token"].encode()
-          for role in ("mac", "windows")]
-assets = list((root / "dist").glob("*-v0.3.4.zip"))
-assert len(assets) == 2
-for asset in assets:
-    with zipfile.ZipFile(asset) as archive:
-        assert archive.testzip() is None, "Corrupt archive"
-        for name in archive.namelist():
-            parts = Path(name).parts
-            assert "secrets" not in parts, "Private directory in release"
-            assert Path(name).name not in ("chicklink-connection.json", "connection.json", ".env"), "Private config in release"
-            data = archive.read(name)
-            assert all(token not in data for token in tokens), "Private token in release"
-    print(asset.name + ": public archive check passed")
-binary = root / "dist/ChickLink-windows-x64-v0.3.4.exe"
-assert all(token not in binary.read_bytes() for token in tokens)
-print("Public executable token check passed")
+from public_archive import check_archive
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DIST = ROOT / "dist"
+VERSION = "0.3.4"
+
+
+def known_private_tokens() -> tuple[bytes, ...]:
+    tokens = []
+    for role in ("mac", "windows"):
+        path = DIST / "cloud-20260912" / role / "chicklink-connection.json"
+        if path.is_file():
+            tokens.append(json.loads(path.read_text())["access_token"].encode())
+    for directory in (ROOT / "deploy/lan-test.local", ROOT / "deploy/secrets/aliyun"):
+        env = directory / "client-tokens.env"
+        if env.is_file():
+            for line in env.read_bytes().splitlines():
+                if b"=" in line and not line.startswith(b"#"):
+                    tokens.append(line.partition(b"=")[2].strip())
+        mapping = directory / "access-tokens.json"
+        if mapping.is_file():
+            tokens.extend(key.encode() for key in json.loads(mapping.read_text()))
+    return tuple(token for token in tokens if len(token) >= 16)
+
+
+def main() -> None:
+    tokens = known_private_tokens()
+    archives = (
+        DIST / f"ChickLink-server-docker-source-v{VERSION}.zip",
+        DIST / f"ChickLink-windows-x64-v{VERSION}.zip",
+    )
+    for archive in archives:
+        check_archive(archive, tokens)
+        print(f"{archive.name}: public archive check passed")
+    binary = DIST / f"ChickLink-windows-x64-v{VERSION}.exe"
+    data = binary.read_bytes()
+    if any(token in data for token in tokens):
+        raise ValueError("Known private token in public executable")
+    print("Public executable token check passed")
+
+
+if __name__ == "__main__":
+    main()

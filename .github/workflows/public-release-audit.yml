@@ -1,0 +1,19 @@
+name: Public release archive audit
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  archive:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check archive rejection cases
+        run: python3 -m unittest discover -s packaging -p test_public_archive.py
+      - name: Build and check server source archive
+        run: |
+          python3 packaging/build-server-source.py /tmp/chicklink-server-source-audit.zip
+          python3 -c 'import sys; from pathlib import Path; sys.path.insert(0, "packaging"); from public_archive import check_archive; check_archive(Path("/tmp/chicklink-server-source-audit.zip"))'
