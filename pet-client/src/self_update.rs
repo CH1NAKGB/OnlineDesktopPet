@@ -12,6 +12,7 @@ new=$2
 pid=$3
 backup="$old.bak"
 marker=$4
+opener=$5
 i=0
 while kill -0 "$pid" 2>/dev/null; do
   [ "$i" -lt 60 ] || exit 1
@@ -22,12 +23,12 @@ done
 mv "$old" "$backup" || exit 1
 if /usr/bin/ditto "$new" "$old"; then
   printf '%s' "$old" > "$marker"
-  /usr/bin/open "$old"
-  exit 0
+  if "$opener" "$old"; then exit 0; fi
+  rm -f "$marker"
 fi
 rm -rf "$old"
 mv "$backup" "$old" || exit 1
-/usr/bin/open "$old"
+"$opener" "$old"
 exit 1
 "#;
 
@@ -115,6 +116,7 @@ pub fn install(archive: &Path) -> Result<(), String> {
         .arg(&next)
         .arg(std::process::id().to_string())
         .arg(root.join("update-pending.txt"))
+        .arg("/usr/bin/open")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(err))
@@ -157,11 +159,44 @@ mod tests {
             .arg(root.join("missing.app"))
             .arg("9999999")
             .arg(root.join("marker.txt"))
+            .arg("/usr/bin/true")
             .output()
             .unwrap();
         assert!(!output.status.success());
         assert_eq!(fs::read_to_string(old.join("marker")).unwrap(), "old");
         assert!(!root.join("Chick Link.app.bak").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn successful_replace_keeps_backup_and_records_marker() {
+        let root =
+            std::env::temp_dir().join(format!("chicklink-replace-{:x}", rand::random::<u64>()));
+        let old = root.join("Chick Link.app");
+        let next = root.join("next.app");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&next).unwrap();
+        fs::write(old.join("marker"), "old").unwrap();
+        fs::write(next.join("marker"), "new").unwrap();
+        let script = root.join("install.sh");
+        let marker = root.join("pending.txt");
+        fs::write(&script, HELPER).unwrap();
+        let output = Command::new("/bin/sh")
+            .arg(&script)
+            .arg(&old)
+            .arg(&next)
+            .arg("9999999")
+            .arg(&marker)
+            .arg("/usr/bin/true")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(fs::read_to_string(old.join("marker")).unwrap(), "new");
+        assert_eq!(
+            fs::read_to_string(root.join("Chick Link.app.bak/marker")).unwrap(),
+            "old"
+        );
+        assert_eq!(fs::read_to_string(marker).unwrap(), old.to_string_lossy());
         fs::remove_dir_all(root).unwrap();
     }
 }
