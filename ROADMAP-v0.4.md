@@ -80,6 +80,187 @@
 - **验收标准**：无邀请码注册被拒；同一邀请码只能用一次；邀请只能由已配对账号发放；注销后重新登录失败且服务端查不到该用户历史；导出文件可读且不含他人消息。
 - **证据**：[CLOUD-ACCOUNTS.md](deploy/standalone/CLOUD-ACCOUNTS.md) 更新 + 集成测试用例。
 
+## 2.5 M0 安装与升级基座（新增，排在 M1 之前）
+
+> 2026-10-15 新增。用户已确认三项决定：Windows 安装器原地无缝升级、客户端检查更新 + macOS 应用内自更新、
+> 自更新必须**用户手动触发**（自动检查可以，自动安装不可以，因为包没有代码签名）。
+> **M0-1 是 M0-4/M0-5/M0-6 的前置条件**：没有单实例互斥，安装器的"自动关旧进程"与自更新的"等旧进程退出"
+> 都没有可靠判定依据，升级过程中会出现两个客户端同时写 outbox 与 `session.json`。
+
+### M0-1 单实例互斥（前置，最高优先级）
+
+- **现状**：完全没有跨进程锁。全仓库唯一的锁是 `deploy/standalone/renew-certificate.sh:8` 的 `flock`。
+  `main.rs:1412` 的 outbox 守卫是**进程内** `static Mutex`，两个进程可同时写
+  outbox、`session.json`、`chat-history.jsonl`、`cursor`、`device-id`。
+- **动作**：
+  - Windows 用命名互斥体：`CreateMutexW` + `GetLastError() == ERROR_ALREADY_EXISTS`
+    （`windows-sys` 已在依赖中，补 `Win32_System_Threading` 即可，无需新 crate）。
+  - macOS 用 `flock(LOCK_EX | LOCK_NB)` 锁住 `app_data_root()/instance.lock`（`libc` 已在依赖中）。
+  - 第二个实例默认行为：**不弹窗、不抢焦点**，写一行日志后退出（退出码区分"已有实例"）。
+  - 互斥体/锁文件名**不得带版本号**——升级瞬间新旧版本必须互斥到同一个名字，
+    否则会出现两只小鸡同时运行并互相覆盖数据。
+    （参考实现 desktop-fushi 用带版本的名字是为了让"新版接管旧版"，我们的需求相反：固定名字。）
+  - 获取时机：创建窗口**之前**、打开 outbox/session **之前**。
+- **验收标准**：
+  - 双击两次只出现一只小鸡，第二个进程退出且**不触碰**本地文件（比对文件 mtime/内容无变化）；
+  - 第二个实例退出不产生 `Error` 级日志与气泡；
+  - 强杀第一个实例后，第二个实例能立即拿到锁（验证无锁残留）；
+  - 单元测试覆盖获取/释放；Windows 与 macOS 各做一次真机双开验证（未做即标"未验收"）。
+- **证据**：`pet-client` 新增模块与测试 + [offread.md](offread.md) 当日小节。
+
+### M0-2 桌宠与聊天窗口位置持久化
+
+- **现状**：每次启动都用 `initial_pet_position(&monitor)`（[main.rs:1377](pet-client/src/main.rs#L1377)）
+  重算右下角；`WindowEvent::Moved` 目前**只用来重读刷新率**（[main.rs:1079](pet-client/src/main.rs#L1079)）；
+  聊天窗口创建时（[chat_window.rs:169](pet-client/src/chat_window.rs#L169)）只设尺寸、不设位置。
+- **动作**：
+  - 沿用 `config.rs` 已有的 `*.txt` 设置写法（与 `sounds-enabled.txt`、`sound-theme.txt` 同一套机制），
+    新增 `pet-window-position.txt` 与 `chat-window-position.txt`，格式 `x,y`（物理像素）；
+  - 桌宠窗口在 `WindowEvent::Moved` 后**去抖**写入（拖动过程中不要每帧写盘）；
+  - 聊天窗口创建时读回位置，并在其 `Moved` 事件同样去抖写入；
+  - 启动恢复时按当前显示器集合**钳制**回可见区域：拔掉副屏、改分辨率、改缩放后不能跑到屏幕外；
+  - 保存物理坐标，恢复时按目标显示器 `scale_factor` 换算，避免不同缩放下错位。
+- **验收标准**：拖到副屏角落 → 退出 → 重启位置保持；拔掉副屏后启动仍在可见区域；
+  100%/200% 缩放下换算正确；桌宠与聊天窗口各自独立记忆。
+- **说明**：**不含按像素命中测试**（透明像素不响应点击需自研 `WM_NCHITTEST` + alpha 判断，
+  见 [INTEGRATION_CHECKLIST](third_party/open_source_candidates/INTEGRATION_CHECKLIST.md) 第 3 项），
+  那一项不阻塞本里程碑。
+- **证据**：截图（改动前后）+ [offread.md](offread.md) 记录。
+
+### M0-3 版本号单一来源（M0-4/M0-5/M0-6 的共同前置）
+
+- **现状**：版本号写死在多处：`installer.nsi` 的 `VERSION "0.3.4"` / `VIProductVersion "0.3.4.1"`、
+  内嵌载荷路径 `ChickLink-windows-x64-v0.3.4.exe`、`build-installer.sh` 的输出名与 `dist/private-v0.3.4`、
+  `release.sh` 的 `VERSION=0.3.4`、`check-installer.py` 的三处 `v0.3.4`。
+  `deploy/relay.sh:6-10` 已有唯一可信的读取方式，应复用。
+- **动作**：
+  - `build-installer.sh` 与 `release.sh` 统一用 `deploy/relay.sh` 那段 `awk` 从 `Cargo.toml`
+    的 `[workspace.package]` 读版本；
+  - `makensis -DVERSION=… -DVI_VERSION="<ver>.0"`；输出名一律用 `$VERSION`
+    （public：`dist/ChickLink-Setup-v$VERSION.exe`；private：`dist/private-v$VERSION/…`）；
+  - `installer.nsi` 删除全部写死版本，改用 `${VERSION}`/`${VI_VERSION}`，
+    **在 `MUI2.nsh` 之前加 `!define NSIS_MAX_STRLEN 8192`**（M0-4 读 PEM 需要长字符串）；
+  - `check-installer.py` 不再写死路径，按版本拼路径；
+  - 版本号只允许出现在 `Cargo.toml`；检查方式与允许清单写进发版清单。
+- **验收标准**：改 `Cargo.toml` 一处后，两个安装器输出名、注册表 `DisplayVersion`、
+  客户端上报版本全部自动跟随；`makensis -V3` 编译两个安装器无语法错误。
+- **约束**：`Cargo.toml` 版本必须保持**纯三段数字**。预发布后缀（如 `0.4.0-rc.1`）
+  会打断 M0-4 的三段比较，若将来要用必须先扩展比较逻辑。
+
+### M0-4 Windows 安装器原地无缝升级
+
+- **现状**：`installer.nsi` 用 `AllowSkipFiles off`，文件被占用时由 NSIS 弹"重试/取消"；
+  `MUI_DIRECTORYPAGE_TEXT_TOP` 仍写着"安装前请退出正在运行的小鸡"；
+  无升级检测、无降级确认、无进程关闭、无公钥更新逻辑。
+- **动作**：
+  1. **升级检测**：`.onInit` 读 `HKCU ${UNINSTALL_KEY}` 的 `DisplayVersion` 与 `InstallLocation`；
+     后者非空即 `$IsUpgrade=1`（`InstallDirRegKey` 已保证 `$INSTDIR` 指向原目录，保持不动）。
+  2. **防降级**：三段数字比较，旧 > 新 → `MB_YESNO` 提示
+     "降级可能导致新版数据无法读取"，选否即 `Abort`。
+  3. **跳过目录页**：`MUI_PAGE_CUSTOMFUNCTION_PRE dir_page_pre`，`$IsUpgrade==1` → `Abort`（整页跳过）。
+  4. **自动关闭旧进程**（无感的关键）：`SEC_MAIN` 开头
+     `nsExec::Exec 'taskkill /IM pet-client.exe'`（**不带 `/F` = 发送 WM_CLOSE，走优雅退出**），
+     返回 0 记 `$WasRunning=1`；随后最多 10 次、每次 500ms 用"能否以追加方式打开
+     `$INSTDIR\pet-client.exe`"判断解锁（`FileOpen` + `ClearErrors`/`IfErrors`）；
+     仍锁定则 `taskkill /F` 再等 1 秒；最终仍锁定 → `MessageBox` 提示手动退出并 **`Abort`**
+     （**绝不静默跳过文件**）。待发送队列在入队时已落盘，关进程不会丢已入队消息。
+  5. **公钥指纹白名单**（仅 `PRIVATE_CONFIG` 分支）：新增 `packaging/superseded-keys/` 存放历史废止公钥。
+     `$APPDATA\ChickLink\relay-public.pem` 存在时逐行 `FileRead` 拼接（最多 64 行）与白名单逐个比较：
+     相等 → 改名为 `relay-public.pem.superseded-<版本>` 后写入包内新公钥；
+     **不相等 → 该文件完全不动**（视为用户自有配置）。`connection.json` 维持"已存在就永不覆盖"。
+  6. **完成页与便携版**：保留 `MUI_FINISHPAGE_RUN`（默认勾选启动）；
+     `$WasRunning==1` 时完成页注明"升级完成，原配置已保留"。
+- **文档**：`packaging/WINDOWS-INSTALL.md` 记录轮换规则（轮换时必须把旧公钥加入白名单并随新版发布）
+  与便携版升级方式（只替换 `pet-client.exe`，保留同目录 `chicklink-connection.json` 与 `relay-public.pem`）。
+- **真机验收（未做即标"未验收"）**：
+  1. 已装旧版、已配对、有聊天记录、已开自启、小鸡正在运行时双击新安装器：
+     **无"重试/取消"对话框、无需手动退出**；
+  2. 升级后配对关系/昵称/聊天记录/音效/自启/快捷方式全保留，
+     `%APPDATA%\ChickLink\connection.json` 的 SHA-256 与升级前**完全一致**；
+  3. 不出现目录选择页；用更旧安装包覆盖时出现降级确认；
+  4. `relay-public.pem` 换成白名单里的旧公钥 → 安装后被更新且留 `.superseded-*` 备份；
+     换成其他内容 → **逐字节不变**；
+  5. 便携版回归：只替换 exe，配置仍自动读取，无需重新配对。
+- **待确认**：macOS 侧是否需要等价规则——`release.sh` 目前**不把 `relay-public.pem` 放进 DMG**
+  （只有 `Info.plist`、字体许可证与 app），所以 macOS 用户的公钥来源需要先核实
+  （`config.rs:127` 会把 `server_rsa_public_key_path` 设为 `relay-public.pem`）。
+
+### M0-5 客户端检查更新
+
+- **依赖**：`ureq = { version = "2", default-features = false, features = ["native-tls"] }`，
+  **阻塞式**，因此放独立 `std::thread`，结果经现有 events 通道回主线程，不阻塞网络线程。
+- **请求**：`GET <更新源>`，默认
+  `https://api.github.com/repos/CH1NAKGB/OnlineDesktopPet/releases/latest`；
+  必带 `User-Agent: ChickLink/<本地版本>` 与 `Accept: application/vnd.github+json`；超时 10 秒；
+  失败静默（设置页显示"检查失败"）。更新源可配置：`CHICK_UPDATE_URL` 环境变量 /
+  `connection.json` 字段覆盖默认地址（为镜像预留）。**不发送 token/device_id/聊天内容**；
+  账号窗口隐私说明补一句"检查更新会向 GitHub 发起请求"。
+- **解析**：取 `tag_name`（容忍前导 `v`）、`html_url`、`assets[]`
+  （`name`/`browser_download_url`/`digest`）；与 `env!("CARGO_PKG_VERSION")` 三段比较，
+  **仅远端更大才提示**；忽略 draft/prerelease。
+- **平台挑包**：Windows 优先 `ChickLink-Setup-v<ver>.exe`，其次 windows-x64 zip；
+  macOS 优先 `ChickLink-macos-universal-v<ver>.zip`（自更新用），DMG 作为回退；找不到则回退 `html_url`。
+- **节流与缓存**（沿用 `*.txt` 写法）：启动后**延迟 30 秒**检查一次，此后每 24 小时最多一次；
+  设置页提供手动"检查更新"。文件：`update-check-enabled.txt`（默认开启）、
+  `update-last-check.txt`（unix ms）、`update-latest-version.txt`、`update-notified-version.txt`。
+- **UI**：设置页"更新"区域含当前版本 / 检查按钮 / "发现新版本 a.b.c" /
+  "立即更新"（仅 macOS）与"打开发布页"；打开链接 macOS 用 `open`，
+  Windows 用 `ShellExecuteW`（`windows-sys` 加 `Win32_UI_Shell`）。
+  新版本**只提示一次**（复用 `security_warning_bubble` 的一次性模式，[main.rs:650](pet-client/src/main.rs#L650)/[1342](pet-client/src/main.rs#L1342)）。
+- **验收标准**：启动 30 秒内不发请求；第二次启动因节流不发第二次请求；
+  远端版本更大才提示且只提示一次；`draft`/`prerelease`/更旧版本不提示；
+  请求失败不阻塞主线程、不弹崩溃提示；抓包确认不含 token 与聊天内容。
+
+### M0-6 macOS 应用内自更新（路线 B）
+
+- **前提（写进文档与 UI）**：自更新只能由**已经装了本功能的新版本**发起，
+  更早版本用户需要手动装一次；quarantine 属性由"下载方"写入，应用自己下载的文件不带该标记，
+  因此更新后不触发 Gatekeeper 提示；**只校验 SHA-256，不验证代码签名**——必须诚实写明。
+- **下载**：目标为 `ChickLink-macos-universal-v<ver>.zip` 的 `browser_download_url`。
+  **允许跳转，但必须校验最终 URL 主机在白名单内**：
+  `api.github.com` / `github.com` / `objects.githubusercontent.com` /
+  `release-assets.githubusercontent.com`（release 附件会 302 到后者；用 `get_url()` 取最终地址再判定）。
+  下载到 `/tmp/chicklink-update-<随机>/`，UI 显示进度（已下载/总大小），总超时 5 分钟。
+- **校验**：优先用 API 的 asset `digest`（`sha256:*`），缺失则下载 `SHA256SUMS-v<ver>.txt` 解析对应行；
+  用已有 `sha2` 计算比对。**校验失败 → 删除临时文件并中止，绝不继续。**
+- **解包**：`/usr/bin/ditto -x -k <zip> <临时目录>`（**不要用 Rust zip crate**：会丢符号链接与可执行位）；
+  解出的 `Chick Link.app` 做一次 `codesign --verify --deep --strict` 尽力校验
+  （当前是临时签名，能检出损坏/篡改，**不能当成可信来源证明**）。
+- **替换与重启**（进程运行时不能替换自己）：目标 bundle 由 `current_exe()` 反推
+  （`…/Contents/MacOS/pet-client` → `…/Chick Link.app`）。前置检查任一不满足即回退为"打开发布页"：
+  路径以 `.app` 结尾；**不在 `/Volumes/` 下**（不能从 DMG 自更新）；父目录可写。
+  生成并 detached 启动 `/bin/sh` 辅助脚本（stdout/stderr 重定向到
+  `~/Library/Application Support/ChickLink/update.log`）：
+  ① 等当前 PID 退出（`kill -0` 轮询，最多 30 秒）→ ② `mv "<bundle>" "<bundle>.bak"`
+  → ③ `ditto` 替换，失败则 `mv` 回滚 `.bak` 并 `open` 回滚后的 app 后退出
+  → ④ `open "<bundle>"`。主程序随后走既有关闭路径退出。
+  新版本启动时若发现 `<bundle>.bak` 存在且本次启动正常 → 删除该备份。
+- **失败一律回退**：下载/校验/解包/不可写/替换失败 → 现有 app 保持不动，提示并提供"打开发布页"。
+- **真机验收（未做即标"未验收"）**：
+  1. 替换 `/Applications` 下的 app 后：聊天记录/昵称/配对码/音效设置仍在，开机自启仍有效；
+  2. 真实自更新全流程：下载→校验→替换→自动重启成功，`.bak` 在下次启动后被清理；
+  3. 人为制造校验失败与不可写场景：现有 app 完好、能正常启动、有明确提示；
+  4. **从 DMG 里直接运行时点击"立即更新"→ 必须拒绝并改为打开下载页**。
+
+### M0-7 Windows 侧对等增强（可选，不阻塞）
+
+同一套下载 + 校验代码，Windows 分支改为：下载 `ChickLink-Setup-v<ver>.exe` → 校验 sha256 →
+启动该安装器 → 自己退出（安装器已能自动关旧进程、跳过目录页）。
+**若不做，Windows 保持"打开发布页"，不声称已支持 Windows 应用内更新。**
+
+### M0-8 发布管线与联调
+
+- `packaging/release.sh` 额外产出 macOS ZIP（自更新用）：
+  `(cd "$STAGE/macos" && ditto -c -k --keepParent "Chick Link.app" "$STAGE/macos.zip")`
+  并 `cp` 为 `dist/ChickLink-macos-universal-v$VERSION.zip`，把该 zip 加入
+  `dist/SHA256SUMS-v$VERSION.txt` 的生成列表。
+- **这会改变发布附件清单，只能用于新版本发布，不得回改已发布的 v0.3.4**；
+  同步更新 `packaging/RELEASE-<version>.md` 模板与发版检查清单。
+- **联调**：把 `CHICK_UPDATE_URL` 指向本机 HTTP 服务，返回 GitHub API 格式的假清单、
+  附件指向本地 zip，用于在没有新版本发布前验证全流程（**含校验失败与回滚路径**）。
+- **验收标准**：本地假清单可驱动：正常更新、sha256 不匹配时中止且现有 app 不受影响、
+  不可写路径时回退到打开发布页、24 小时内不重复请求。
+
 ## 3. M1 多设备同步（v0.4 核心）
 
 > 结论前置：你的 A/B/C 场景（A、B 同一账号，C 另一账号）**不需要新架构**——服务端已支持每账号 8 个 token 与多会话 fanout。本里程碑补的是**四类具体瓶颈**（分页、设备管理、设备标识、表情全量下载）外加两条体验/决策项。
@@ -204,9 +385,13 @@
 
 > 排期：M4-A 三项建议随 v0.4 一起发（多为本地改动、风险低）；M4-B 紧随其后，**不阻塞 v0.4 发布**。
 
-### M4-A1 记住桌宠与聊天窗口的位置
+### M4-A1 记住桌宠与聊天窗口的位置（已上移到 M0-2，见第 2.5 节）
 
-- **现状**：完全没有持久化，每次启动都用 `initial_pet_position(&monitor)` 的默认位置（[main.rs:947](pet-client/src/main.rs#L947)），拖到副屏角落的摆放重启就丢。
+> 2026-10-15：本项已提升为 **M0-2**（安装/升级基座的一部分），动作与验收标准以第 2.5 节为准。
+> 原因：它与 M0-1 同属窗口层改动，且"升级后窗口位置不丢"属于本次升级体验的验收内容。
+> 下面保留原始描述作为背景，不再单独排期。
+
+- **现状**：完全没有持久化，每次启动都用 `initial_pet_position(&monitor)` 的默认位置（[main.rs:1377](pet-client/src/main.rs#L1377)），拖到副屏角落的摆放重启就丢。
 - **动作**：移动结束时保存桌宠与聊天窗口的物理坐标（写进现有本地设置目录，与 `sounds-enabled.txt` 同一套机制）；启动时恢复；显示器数量/分辨率变化后把坐标钳制回可见区域。
 - **验收标准**：拖到副屏角落 → 退出 → 重启，位置保持；拔掉副屏后启动，窗口仍出现在可见区域内（不跑到屏幕外）；多显示器不同缩放下的坐标换算正确。
 
@@ -299,6 +484,14 @@
 | P0-3 | 监控与告警 | 未验收 | `161034a`；[模拟故障 run 38735470529](https://github.com/CH1NAKGB/OnlineDesktopPet/actions/runs/38735470529) + [Issue #1](https://github.com/CH1NAKGB/OnlineDesktopPet/issues/1) 及 mention 通知；线上 `/version` 仍为 404，cron 未启用 |
 | P0-4 | 证书续期闭环 | 已验收 | 线上证书到期 2027-01-13 + 自动续期计时器复跑；见 offread 与 standalone/README |
 | P0-5 | 邀请制注册与数据自服务 | 未开始 | 集成测试 + 文档 |
+| M0-1 | 单实例互斥（M0-4/5/6 前置） | 未验收 | macOS 双进程验证 + 单测 + Windows 目标编译；Windows 真机双开待验收，见 offread |
+| M0-2 | 桌宠/聊天窗口位置持久化（原 M4-A1） | 未验收 | 物理坐标保存/去抖/可见区域钳制已实现，位置单测 2 项及 macOS/Windows 编译通过；双屏和缩放真机截图待做 |
+| M0-3 | 版本号单一来源 | 未验收 | Cargo 版本读取已接入发布/安装/检查脚本；`makensis` 两种安装器编译和载荷检查通过，Windows 注册表 DisplayVersion 待真机核对 |
+| M0-4 | Windows 安装器原地无缝升级 | 未验收 | 升级识别、降级确认、旧进程关闭/占用终止、配置保留与废止公钥白名单已写；NSIS 公/私编译和载荷检查通过，Windows 真机五条待验收 |
+| M0-5 | 客户端检查更新（L2 提示） | 未验收 | `7d0d3fa`；30 秒延迟/24 小时节流、手动检查、挑包和一次性提示；本机假清单及请求头单测通过，真实 UI 与抓包待验收 |
+| M0-6 | macOS 应用内自更新 | 未验收 | `7d0d3fa`；URL 白名单、SHA-256、ditto、签名完整性检查、退出后替换与 `.bak` 回滚；辅助脚本回滚单测通过，macOS 已安装应用四条真机用例待验收 |
+| M0-7 | Windows 自更新对等（可选） | 未验收 | `7d0d3fa`；校验后启动 Setup 并退出，Windows GNU 目标编译通过；Windows 真机升级待验收 |
+| M0-8 | 发布管线 macOS ZIP + 本地联调 | 未验收 | `7d0d3fa`；`release.sh` 增加 ZIP 和 SHA256SUMS；本机假清单正常下载/错误摘要拦截通过；新版本全量产物与真实升级待验收，v0.3.4 附件未改 |
 | M1-1 | 分页按字节预算 | 未开始 | 单测 + 耗时记录 |
 | M1-2 | 设备列表与远程登出 | 未开始 | 集成测试 + 截图 |
 | M1-3 | 踢出/恢复 UX | 未开始 | 三机录屏/截图 |
@@ -309,7 +502,7 @@
 | M2-0 | 功耗指标口径 | 未开始 | TESTING.md |
 | M2-1–M2-4 | 低功耗实现 | 未开始 | 测量报告 |
 | M3-1–M3-6 | UI 适配工程化 | 未开始 | golden 截图矩阵 |
-| M4-A1 | 窗口位置记忆 | 未开始 | 重启前后截图 |
+| M4-A1 | 窗口位置记忆（已上移到 M0-2） | 未验收 | 以 M0-2 的重启前后截图验收 |
 | M4-A2 | 未读体系与角标 | 未开始 | 三机截图 |
 | M4-A3 | 投递状态与同步进度 | 未开始 | 断网/重连截图 |
 | M4-B1 | 正在输入与上次在线 | 未开始 | 双机演示 |
@@ -324,4 +517,16 @@
 - **低功耗阈值可能不达预期**：首次测量结果与本文目标不一致时，改目标并记录，不要改测量口径来"达标"。
 - **UI golden 截图会带来维护成本**：容差与更新流程必须写清楚，否则会被绕过。
 - **避免同时开三条战线**：M1–M3 是 v0.4 的发布门槛，M4/M5 是随后一批；任何时候只推进一个里程碑。
-- **回滚原则**：每个里程碑单独提交；涉及服务端的改动保留旧二进制与配置，按 [KEY-ROTATION.md](deploy/standalone/KEY-ROTATION.md) 的方式做过渡，而不是覆盖。
+- **升级只许替换程序，绝不许碰用户数据**（M0）：安装器与替换脚本只能写
+  `$INSTDIR` / `Chick Link.app` 与注册表项；客户端可在自身数据目录写更新设置、日志和待清理备份标记，
+  **不得**迁移或覆盖 `%APPDATA%\ChickLink` 与 `~/Library/Application Support/ChickLink` 里的账号、聊天及配对数据。
+  违反这条的"升级优化"一律不做。
+- **数据兼容方向是单向的**：新版可能写入旧版读不懂的字段，所以降级必须显式确认（M0-4 第 2 条），
+  且不承诺"降级后数据完好"。真机验收要覆盖"用更旧安装包覆盖"。
+- **自更新没有代码签名背书**：只校验 SHA-256，`codesign --verify` 只能检出损坏/篡改，
+  **不能证明来源可信**。因此安装动作必须用户手动触发（自动检查可以，自动安装不可以），
+  失败一律回退到"打开发布页"，不得自动重试安装。
+- **升级窗口内的双实例风险**：安装器 `taskkill` 与自更新的"等 PID 退出"都依赖 M0-1 的单实例锁兜底；
+  锁名不带版本号是硬要求，否则升级瞬间会出现两只小鸡互相覆盖数据。
+- **回滚原则**：每个里程碑单独提交；涉及服务端的改动保留旧二进制与配置，按 [KEY-ROTATION.md](deploy/standalone/KEY-ROTATION.md) 的方式做过渡，而不是覆盖；
+  macOS 自更新必须保留 `<bundle>.bak`，直到新版本成功启动一次后才清理。

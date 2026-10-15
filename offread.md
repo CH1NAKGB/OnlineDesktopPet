@@ -13,6 +13,27 @@
 - v0.4 路线图 P0-1 已由提交 `b74b1c7e1984c79240c28d51120a5c95220bae97` 固定。回归：`cargo fmt --all --check`、`cargo check --workspace --locked`、`cargo test --workspace --locked`、Windows GNU 目标 `cargo check`、`sh deploy/tests/relay-smoke.sh` 均通过。测试结果为客户端 42 通过/1 项真实音频设备测试忽略、中继 27 通过、协议 9 通过。双 RSA 私钥隔离中继测试让旧公钥与新公钥客户端分别握手并双向发送事件；无加密通道下注册、登录、恢复、Resume 在发送前被拒绝。实际启动测试：`CHICK_DISCOVER_LAN=true` 且无公钥以“LAN 自动发现需要预置中继 RSA 公钥”退出。账号连接缺 RSA 时聊天状态栏与桌宠气泡提示错误。沙盒内回环端口测试需允许本机监听；`block v0.1.6` future-incompat 警告仍在。部署 smoke 仅用假 Docker 验证命令连接，未验证真实容器运行。
 - `0.3.3` 文档检索结果仅保留历史版本记录：`offread.md`、`ROADMAP-v0.4.md`、`deploy/centos7.md`、`deploy/QUICKSTART.md`、`deploy/standalone/README.md`、`packaging/LAN-TEST.md`、`packaging/TESTING.md`、`third_party/open_source_candidates/INTEGRATION_CHECKLIST.md`。当前工作流、脚本、Compose 版本均取 v0.3.4。
 - P0-2 备份验收清单已写入 `deploy/standalone/BACKUP-RUNBOOK.md`。桌面副本仍是未加密同机临时副本；用户将自行加密，离线介质、密文解密恢复、业务登录/配对演练及新 ACME 凭据备份尚未完成。生产云库尚未启用，无生产云历史可恢复。此项不得标为已验收。
+- 2026-10-15 新增 **M0 安装与升级基座**计划（见 [ROADMAP-v0.4.md](ROADMAP-v0.4.md) 第 2.5 节），
+  用户已确认三项决定：①Windows 安装器原地无缝升级；②客户端检查更新 + macOS 应用内自更新（路线 B），
+  更新源用 GitHub API；③公钥策略为 `connection.json` 永不覆盖、`relay-public.pem` 仅在等于
+  "已知被替换公钥"时更新并留备份；且**自更新必须用户手动触发**（自动检查可以，自动安装不可以，
+  因为包没有代码签名）。
+  **关键前置**：`M0-1 单实例互斥` 同时是安装器"自动关旧进程"和自更新"等旧进程退出"的判定基础，
+  必须最先做；`M0-2 桌宠/聊天窗口位置持久化`（原 M4-A1，已上移）；
+  `M0-3 版本号单一来源` 是安装器与客户端版本比较的共同前置。
+- **前一轮记录**：当时只写计划与文档，**没有改动任何业务代码**，M0 全部条目均为"未开始"；
+  Windows 无感升级、macOS 自更新、真机升级验收都尚未执行。不得把本节读成已完成。
+- 2026-10-15 接续开发已实现 M0-1 单实例互斥：Windows 固定名 `Local\ChickLink.SingleInstance`
+  互斥体、macOS 数据目录 `instance.lock` 非阻塞文件锁；在读取配置和创建窗口前取得，第二实例
+  写一行日志并以退出码 10 离开。单元测试覆盖获取/释放，macOS 使用临时 HOME 的两个真实
+  客户端进程验证第二实例退出、文件内容和 mtime 不变、强杀首实例后能重新启动。
+  `cargo fmt --all --check`、客户端单测（43 通过/1 项音频忽略）、Windows GNU 目标
+  `cargo check` 通过。全 workspace 的中继 9 项回环集成测试因当前沙盒禁止本机监听失败，
+  与本次客户端改动无关。Windows 真机双开仍待验证，M0-1 状态为**未验收**。
+- 2026-10-15 M0-2 已实现：桌宠与聊天窗口分别将物理坐标写入 `pet-window-position.txt` / `chat-window-position.txt`，移动结束后 350 ms 去抖保存；启动时按当前显示器物理范围和缩放后的窗口尺寸恢复并钳制。位置解析和副屏移除钳制单测 2 项通过，macOS 当前目标与 Windows GNU 目标编译通过。双屏拔插、100%/200% 缩放和重启前后截图尚未真机验收，状态为**未验收**。
+- 2026-10-15 M0-3 已实现：版本号从 `Cargo.toml` 的 `[workspace.package]` 读取，发布脚本、NSIS 公/私安装器输出名、安装器载荷、校验脚本同步。`makensis -V3` 公/私两种安装器均编译成功，`check-installer.py` 核对载荷和身份隔离通过；Windows 注册表 `DisplayVersion` 尚未真机核对，状态为**未验收**。当前生成的 v0.3.4 包仅作本机检查，未替换历史 GitHub 安装附件。
+- 2026-10-15 M0-4 已实现安装器分支：读取旧版和安装目录、降级确认、升级跳过目录页、先 `taskkill` 正常退出再限时等待/强制退出、文件仍占用时中止；私用包始终保留 `connection.json`，仅精确匹配 `packaging/superseded-keys/` 中旧公钥时留备份并替换。白名单目前为空，未轮换生产公钥。NSIS 公/私编译、载荷检查与临时白名单编译分支通过；Windows 真机五项升级/降级/配置验证尚未做，状态为**未验收**。
+- 2026-10-15 M0-5 至 M0-8 代码提交 `7d0d3fa`，均**未验收**：客户端在启动 30 秒后按 24 小时节流从可配置 GitHub API 检查更新，手动检查与一次性提示可用；只在用户点击后下载，限制跳转最终主机、流式计算 SHA-256，macOS 解包后由辅助脚本等待旧进程退出、备份替换并在失败时回滚，Windows 校验后启动 Setup。发布脚本新增 macOS ZIP 与摘要，Info.plist 由 Cargo 版本生成；`packaging/RELEASE-CHECKLIST.md` 记录新版本附件检查。`cargo fmt --all --check`、`cargo check --workspace --locked`、Windows GNU 目标编译、`cargo test --workspace --locked`、`sh deploy/tests/relay-smoke.sh` 均通过；客户端 50 通过/1 忽略，中继 27、协议 9 通过。假 HTTP 清单测试涵盖下载成功、SHA-256 错误拦截及请求头无令牌，辅助脚本替换失败回滚单测通过。真实应用内更新、双屏窗口、Windows 安装升级、完整新版本打包和 UI 抓包仍需真机验收；未改动 GitHub v0.3.4 附件。
 
 - 本轮修改开始前，`main` 与 `origin/main` 同步；提交 `74d3add` 已公开。此后以实时 `git status` 和 `git log` 为准，不能沿用下文旧的“未提交改动”判断。
 - 2026-10-15 已修复证书续期：服务器 ACME 出站恢复、staging DNS-01 成功、生产新证书已切换；外部验证线上证书到期 **2027-01-13 09:50:43 UTC**，HTTPS 健康检查通过。`chicklink-cert-renew.timer` 已启用，每天 04:00 和 16:00 检查；当日手动重跑确认未到续期窗口时不重新签发或重启 TLS。旧的本机证书副本仍于 2026-12-10 到期，不要把它当作线上现状。
