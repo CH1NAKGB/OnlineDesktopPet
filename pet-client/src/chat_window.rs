@@ -154,6 +154,7 @@ pub struct ChatWindow {
     dark_mode: bool,
     pending_size: Option<winit::dpi::PhysicalSize<u32>>,
     resize_deadline: Option<Instant>,
+    position: crate::window_position::PositionRecorder,
 }
 
 impl ChatWindow {
@@ -168,6 +169,13 @@ impl ChatWindow {
             .with_title("Chick Link")
             .with_inner_size(LogicalSize::new(460.0, 720.0))
             .with_min_inner_size(LogicalSize::new(360.0, 560.0));
+        let attributes = crate::window_position::restore(
+            event_loop,
+            crate::window_position::WindowKind::Chat,
+            (460.0, 720.0),
+        )
+        .map(|position| attributes.clone().with_position(position))
+        .unwrap_or(attributes);
         let window = Arc::new(event_loop.create_window(attributes)?);
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance.create_surface(window.clone())?;
@@ -267,6 +275,9 @@ impl ChatWindow {
             dark_mode,
             pending_size: None,
             resize_deadline: None,
+            position: crate::window_position::PositionRecorder::new(
+                crate::window_position::WindowKind::Chat,
+            ),
         })
     }
 
@@ -574,6 +585,7 @@ impl ChatWindow {
         }
         match event {
             WindowEvent::CloseRequested => {
+                self.position.flush();
                 if self.cloud.recovery_notice.is_some() {
                     self.cloud.status = "请先保存恢复码并确认".into();
                     self.window.request_redraw();
@@ -591,6 +603,7 @@ impl ChatWindow {
                 self.pending_size = Some(*size);
                 self.resize_deadline = Some(Instant::now() + Duration::from_millis(40));
             }
+            WindowEvent::Moved(position) => self.position.moved(*position),
             WindowEvent::ThemeChanged(theme) => {
                 self.dark_mode = matches!(theme, Theme::Dark);
                 configure_style(&self.context, self.dark_mode);
@@ -617,6 +630,7 @@ impl ChatWindow {
 
     pub fn process_deferred_actions(&mut self) {
         let now = Instant::now();
+        self.position.flush_if_due(now);
         if self.cloud.expire_auth(now) {
             self.window.request_redraw();
         }
@@ -630,6 +644,10 @@ impl ChatWindow {
             activate_windows_chat(&self.window);
             self.window.request_redraw();
         }
+    }
+
+    pub fn position_deadline(&self) -> Option<Instant> {
+        self.position.deadline()
     }
 
     fn apply_pending_resize(&mut self) {

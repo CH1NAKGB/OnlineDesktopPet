@@ -13,6 +13,7 @@ mod renderer;
 mod single_instance;
 mod sound;
 mod startup;
+mod window_position;
 #[cfg(target_os = "windows")]
 mod windows_renderer;
 
@@ -27,6 +28,7 @@ use frame_pacer::FramePacer;
 #[cfg(not(target_os = "windows"))]
 use renderer::Renderer;
 use shared_protocol::{MessageBody, PetSkin, SharedPetAction};
+use window_position::{PositionRecorder, WindowKind};
 #[cfg(target_os = "windows")]
 use windows_renderer::Renderer;
 use winit::{
@@ -533,6 +535,7 @@ struct PetApp {
     bubble: Option<(String, Instant)>,
     // Keep this across reconnect attempts so a persistent configuration error is shown once.
     security_warning_bubble: Option<String>,
+    pet_position: PositionRecorder,
     chat_window: Option<ChatWindow>,
     open_chat_on_start: bool,
     latency_ms: Option<u32>,
@@ -577,6 +580,7 @@ impl PetApp {
             pairing_code,
             bubble: None,
             security_warning_bubble: None,
+            pet_position: PositionRecorder::new(WindowKind::Pet),
             chat_window: None,
             open_chat_on_start,
             latency_ms: None,
@@ -970,6 +974,10 @@ impl ApplicationHandler for PetApp {
                     .with_position(initial_pet_position(&monitor))
             })
             .unwrap_or(attributes);
+        let attributes =
+            window_position::restore(event_loop, WindowKind::Pet, (PET_WIDTH, PET_HEIGHT))
+                .map(|position| attributes.clone().with_position(position))
+                .unwrap_or(attributes);
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
@@ -1018,7 +1026,10 @@ impl ApplicationHandler for PetApp {
             return;
         };
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.pet_position.flush();
+                event_loop.exit();
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -1077,7 +1088,12 @@ impl ApplicationHandler for PetApp {
                 self.update_frame_rate(&window);
                 window.request_redraw();
             }
-            WindowEvent::Moved(_) => self.update_frame_rate(&window),
+            WindowEvent::Moved(position) => {
+                self.update_frame_rate(&window);
+                if self.dragging {
+                    self.pet_position.moved(position);
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.resize(size);
@@ -1108,6 +1124,7 @@ impl ApplicationHandler for PetApp {
         let Some(window) = self.window.clone() else {
             return;
         };
+        self.pet_position.flush_if_due(Instant::now());
         if let (Some(monitor), Ok(position)) = (window.current_monitor(), window.outer_position()) {
             let screen = monitor.size();
             let before = self.wander.frame();
@@ -1371,6 +1388,15 @@ impl ApplicationHandler for PetApp {
         if redraw {
             window.request_redraw();
         }
+        let next_wake = self
+            .pet_position
+            .deadline()
+            .map_or(next_wake, |deadline| next_wake.min(deadline));
+        let next_wake = self
+            .chat_window
+            .as_ref()
+            .and_then(ChatWindow::position_deadline)
+            .map_or(next_wake, |deadline| next_wake.min(deadline));
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_wake));
     }
 }
