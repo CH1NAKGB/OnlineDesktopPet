@@ -5,3 +5,4 @@
 3. 完成 macOS 与 Windows 真机升级、回滚、持久化数据验收后运行 `packaging/release.sh` 和 Windows 安装器构建；检查公开包不含私钥、令牌及私用配置。
 4. 核对发布附件含 macOS DMG、macOS ZIP、Windows 安装器、Windows 便携包、服务端源码包和本版本 `SHA256SUMS`；逐个校验摘要。
 5. 只在新版本 Release 上传新附件。已发布的 v0.3.4 附件不用于自更新，也不补发同名 ZIP。
+6. macOS 真机核对 `.app.bak`：新版本启动未满 10 秒或配置/网络线程未就绪时保留；满 10 秒后确认 `update.log` 先记录新旧版本与路径，再清理单个备份和 `update-pending.txt`。强制中断替换时旧应用须可启动。

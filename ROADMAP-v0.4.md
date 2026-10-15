@@ -231,10 +231,12 @@
   路径以 `.app` 结尾；**不在 `/Volumes/` 下**（不能从 DMG 自更新）；父目录可写。
   生成并 detached 启动 `/bin/sh` 辅助脚本（stdout/stderr 重定向到
   `~/Library/Application Support/ChickLink/update.log`）：
-  ① 等当前 PID 退出（`kill -0` 轮询，最多 30 秒）→ ② `mv "<bundle>" "<bundle>.bak"`
-  → ③ `ditto` 替换，失败则 `mv` 回滚 `.bak` 并 `open` 回滚后的 app 后退出
-  → ④ `open "<bundle>"`。主程序随后走既有关闭路径退出。
-  新版本启动时若发现 `<bundle>.bak` 存在且本次启动正常 → 删除该备份。
+  ① 等当前 PID 退出（`kill -0` 轮询，最多 30 秒）→ ② 在同级临时目录完整复制新包
+  → ③ 保留单个 `<bundle>.bak` 并切换应用，失败或中断时由 trap 收敛回旧应用
+  → ④ `open "<bundle>"`。辅助脚本脱离父进程组，日志写入 `update.log`。
+  新版本的 `update-pending.txt` 匹配当前 bundle、进入事件循环满 **10 秒**、配置已加载且网络线程已启动后，
+  先在日志记录新旧版本和路径，再清理这个 `.bak`；未满足时保留备份并待下次启动检查。
+  `preflight()` 只拒绝“marker 匹配当前 bundle，但备份已缺失”的半完成状态。
 - **失败一律回退**：下载/校验/解包/不可写/替换失败 → 现有 app 保持不动，提示并提供"打开发布页"。
 - **真机验收（未做即标"未验收"）**：
   1. 替换 `/Applications` 下的 app 后：聊天记录/昵称/配对码/音效设置仍在，开机自启仍有效；

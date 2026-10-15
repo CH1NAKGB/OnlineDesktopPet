@@ -548,6 +548,12 @@ struct PetApp {
     update_install_running: bool,
     update_exit_pending: bool,
     update_result: Option<Result<Option<update::Release>, String>>,
+    #[cfg(target_os = "macos")]
+    loop_started_at: Option<Instant>,
+    #[cfg(target_os = "macos")]
+    network_thread_started: bool,
+    #[cfg(target_os = "macos")]
+    backup_check_done: bool,
     pet_position: PositionRecorder,
     chat_window: Option<ChatWindow>,
     open_chat_on_start: bool,
@@ -573,6 +579,7 @@ impl PetApp {
         open_chat_on_start: bool,
         update_url: String,
         update_sender: EventSender,
+        #[cfg(target_os = "macos")] network_thread_started: bool,
     ) -> Self {
         Self {
             cloud_user: None,
@@ -603,6 +610,12 @@ impl PetApp {
             update_install_running: false,
             update_exit_pending: false,
             update_result: None,
+            #[cfg(target_os = "macos")]
+            loop_started_at: None,
+            #[cfg(target_os = "macos")]
+            network_thread_started,
+            #[cfg(target_os = "macos")]
+            backup_check_done: false,
             pet_position: PositionRecorder::new(WindowKind::Pet),
             chat_window: None,
             open_chat_on_start,
@@ -1069,6 +1082,8 @@ impl PetApp {
 
 impl ApplicationHandler for PetApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        self.loop_started_at.get_or_insert_with(Instant::now);
         if self.window.is_some() {
             return;
         }
@@ -1107,8 +1122,6 @@ impl ApplicationHandler for PetApp {
             Some(pollster::block_on(Renderer::new(window.clone())).expect("create GPU renderer"));
         self.update_frame_rate(&window);
         self.window = Some(window.clone());
-        #[cfg(target_os = "macos")]
-        self_update::clean_successful_backup();
         #[cfg(target_os = "macos")]
         {
             self.menu = Some(PetMenu::new(self.partner_id.as_deref()));
@@ -1249,6 +1262,16 @@ impl ApplicationHandler for PetApp {
         let Some(window) = self.window.clone() else {
             return;
         };
+        #[cfg(target_os = "macos")]
+        if !self.backup_check_done {
+            if let Some(started) = self.loop_started_at {
+                let elapsed = started.elapsed();
+                if elapsed >= self_update::VERIFIED_LAUNCH_DELAY {
+                    self.backup_check_done = true;
+                    self_update::clean_successful_backup(elapsed, self.network_thread_started);
+                }
+            }
+        }
         if !self.update_check_started && Instant::now() >= self.update_check_at {
             self.update_check_started = true;
             if update::auto_check_due() {
@@ -1576,6 +1599,14 @@ impl ApplicationHandler for PetApp {
         } else {
             next_wake.min(self.update_check_at)
         };
+        #[cfg(target_os = "macos")]
+        let next_wake = if self.backup_check_done {
+            next_wake
+        } else {
+            self.loop_started_at.map_or(next_wake, |started| {
+                next_wake.min(started + self_update::VERIFIED_LAUNCH_DELAY)
+            })
+        };
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_wake));
     }
 }
@@ -1630,7 +1661,7 @@ fn main() -> anyhow::Result<()> {
     };
     let update_url = config.update_url.clone();
     let update_sender = sender.clone();
-    std::thread::spawn(move || network::run(config, sender, commands_rx));
+    let _network_thread = std::thread::spawn(move || network::run(config, sender, commands_rx));
     event_loop.run_app(&mut PetApp::new(
         events_rx,
         commands_tx,
@@ -1640,6 +1671,8 @@ fn main() -> anyhow::Result<()> {
         open_chat_on_start,
         update_url,
         update_sender,
+        #[cfg(target_os = "macos")]
+        true,
     ))?;
     Ok(())
 }

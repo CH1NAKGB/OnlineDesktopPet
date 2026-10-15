@@ -26,3 +26,8 @@ GitHub 的 `ChickLink-Setup-v0.3.4.exe` 是公共版，不带任何个人令牌�
 安装器未代码签名，Windows 可能显示未知发布者。仅使用可信来源并核对 SHA256，
 不要全局关闭 Defender 或 SmartScreen。当前已验证打包和载荷，尚需 Windows 真机
 验证首次安装、运行中覆盖升级、降级确认、配置与公钥保留、卸载及重新安装。
+
+macOS 应用内更新另有回滚保护：旧 `.app.bak` 会保留到新版本进入事件循环至少 10 秒，
+且配置加载和网络线程启动成功后才清理；这不要求已经连上中继。若更早崩溃，
+备份与 `update-pending.txt` 会留到下次启动再检查。更新日志位于本机
+`~/Library/Application Support/ChickLink/update.log`。macOS 真机更新与回滚仍未验收。

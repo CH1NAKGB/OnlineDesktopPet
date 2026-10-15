@@ -1,8 +1,14 @@
 //! Install a verified release after the user explicitly chooses to update.
 
 #[cfg(target_os = "macos")]
+use std::time::Duration;
+#[cfg(target_os = "macos")]
 use std::{fs, path::PathBuf, process::Stdio};
 use std::{path::Path, process::Command};
+
+/// Give the new client time to initialize its window, configuration and network thread.
+#[cfg(target_os = "macos")]
+pub const VERIFIED_LAUNCH_DELAY: Duration = Duration::from_secs(10);
 
 #[cfg(target_os = "macos")]
 const HELPER: &str = r#"#!/bin/sh
@@ -111,10 +117,8 @@ fn current_bundle() -> Result<PathBuf, String> {
 #[cfg(target_os = "macos")]
 pub fn preflight() -> Result<(), String> {
     let bundle = current_bundle()?;
-    if PathBuf::from(format!("{}.bak", bundle.display())).exists() {
-        return Err("发现尚未清理的更新备份，请打开发布页安装".into());
-    }
-    Ok(())
+    let root = crate::config::app_data_root().ok_or("无法确定应用数据目录")?;
+    preflight_state(&bundle, &root)
 }
 #[cfg(not(target_os = "macos"))]
 pub fn preflight() -> Result<(), String> {
@@ -188,17 +192,88 @@ pub fn install(archive: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn clean_successful_backup() {
-    if let Ok(bundle) = current_bundle() {
-        if let Some(root) = crate::config::app_data_root() {
-            let marker = root.join("update-pending.txt");
-            if fs::read_to_string(&marker).ok().as_deref() == bundle.to_str() {
-                let backup = PathBuf::from(format!("{}.bak", bundle.display()));
-                if backup.is_dir() && fs::remove_dir_all(backup).is_ok() {
-                    let _ = fs::remove_file(marker);
-                }
-            }
-        }
+fn backup_path(bundle: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.bak", bundle.display()))
+}
+
+#[cfg(target_os = "macos")]
+fn preflight_state(bundle: &Path, root: &Path) -> Result<(), String> {
+    let marker = root.join("update-pending.txt");
+    if fs::read_to_string(marker).ok().as_deref() == bundle.to_str()
+        && !backup_path(bundle).is_dir()
+    {
+        return Err("更新标记存在但备份缺失，请打开发布页安装".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn bundle_version(bundle: &Path) -> Option<String> {
+    let output = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Print CFBundleShortVersionString"])
+        .arg(bundle.join("Contents/Info.plist"))
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!version.is_empty()).then_some(version)
+}
+
+#[cfg(target_os = "macos")]
+fn clean_verified_at(
+    bundle: &Path,
+    root: &Path,
+    elapsed: Duration,
+    subsystems_ready: bool,
+) -> bool {
+    if elapsed < VERIFIED_LAUNCH_DELAY || !subsystems_ready {
+        return false;
+    }
+    let marker = root.join("update-pending.txt");
+    if fs::read_to_string(&marker).ok().as_deref() != bundle.to_str() {
+        return false;
+    }
+    let backup = backup_path(bundle);
+    if !backup.is_dir() {
+        return false;
+    }
+    let (Some(new_version), Some(old_version)) = (bundle_version(bundle), bundle_version(&backup))
+    else {
+        return false;
+    };
+    let log_path = root.join("update.log");
+    let Ok(mut log) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    else {
+        return false;
+    };
+    use std::io::Write;
+    if writeln!(
+        log,
+        "Chick Link update verified after {}s: old={} new={} bundle={}",
+        elapsed.as_secs(),
+        old_version,
+        new_version,
+        bundle.display()
+    )
+    .is_err()
+    {
+        return false;
+    }
+    if fs::remove_dir_all(&backup).is_err() {
+        return false;
+    }
+    fs::remove_file(marker).is_ok()
+}
+
+#[cfg(target_os = "macos")]
+pub fn clean_successful_backup(elapsed: Duration, subsystems_ready: bool) {
+    if let (Ok(bundle), Some(root)) = (current_bundle(), crate::config::app_data_root()) {
+        let _ = clean_verified_at(&bundle, &root, elapsed, subsystems_ready);
     }
 }
 
@@ -206,6 +281,11 @@ pub fn clean_successful_backup() {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    fn versioned_bundle(path: &Path, version: &str) {
+        fs::create_dir_all(path.join("Contents")).unwrap();
+        fs::write(path.join("Contents/Info.plist"), format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>CFBundleShortVersionString</key><string>{version}</string></dict></plist>")).unwrap();
+    }
 
     #[test]
     fn failed_replace_restores_old_bundle() {
@@ -364,6 +444,73 @@ mod tests {
         assert!(!old.join("Chick Link.app.bak").exists());
         assert!(!backup.exists());
         assert_eq!(fs::read_to_string(pending).unwrap(), old.to_string_lossy());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_cleanup_waits_for_marker_time_and_subsystems() {
+        let root =
+            std::env::temp_dir().join(format!("chicklink-verify-{:x}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        let bundle = root.join("Chick Link.app");
+        let backup = backup_path(&bundle);
+        versioned_bundle(&bundle, "0.4.0");
+        versioned_bundle(&backup, "0.3.4");
+        let marker = root.join("update-pending.txt");
+
+        fs::write(&marker, root.join("other.app").to_string_lossy().as_bytes()).unwrap();
+        assert!(!clean_verified_at(
+            &bundle,
+            &root,
+            Duration::from_secs(11),
+            true
+        ));
+        assert!(backup.exists());
+        fs::write(&marker, bundle.to_string_lossy().as_bytes()).unwrap();
+        assert!(!clean_verified_at(
+            &bundle,
+            &root,
+            Duration::from_secs(9),
+            true
+        ));
+        assert!(backup.exists());
+        assert!(!clean_verified_at(
+            &bundle,
+            &root,
+            Duration::from_secs(11),
+            false
+        ));
+        assert!(backup.exists());
+        assert!(clean_verified_at(
+            &bundle,
+            &root,
+            Duration::from_secs(10),
+            true
+        ));
+        assert!(!backup.exists());
+        assert!(!marker.exists());
+        let log = fs::read_to_string(root.join("update.log")).unwrap();
+        assert!(log.contains("old=0.3.4 new=0.4.0"));
+        assert!(log.contains(bundle.to_str().unwrap()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preflight_allows_pending_backup_but_rejects_missing_backup() {
+        let root =
+            std::env::temp_dir().join(format!("chicklink-preflight-{:x}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        let bundle = root.join("Chick Link.app");
+        let backup = backup_path(&bundle);
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(
+            root.join("update-pending.txt"),
+            bundle.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        assert!(preflight_state(&bundle, &root).is_ok());
+        fs::remove_dir_all(&backup).unwrap();
+        assert!(preflight_state(&bundle, &root).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }
