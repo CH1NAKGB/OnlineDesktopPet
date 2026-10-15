@@ -3,7 +3,9 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
-VERSION=0.3.4
+VERSION=$(sh packaging/version.sh)
+RELEASE_NOTES="packaging/RELEASE-$VERSION.md"
+[ -f "$RELEASE_NOTES" ] || { echo "Missing $RELEASE_NOTES" >&2; exit 1; }
 STAGE=$(mktemp -d /tmp/chicklink-release.XXXXXX)
 echo "Release staging: $STAGE"
 export COPYFILE_DISABLE=1
@@ -19,7 +21,7 @@ lipo -create target/aarch64-apple-darwin/release/pet-client \
     target/x86_64-apple-darwin/release/pet-client -output "$APP/Contents/MacOS/Chick Link"
 cp pet-client/assets/fonts/LICENSE.txt pet-client/assets/fonts/AUTHORS.txt \
     pet-client/assets/fonts/README.md "$APP/Contents/Resources/font-licenses/"
-cp packaging/RELEASE-0.3.4.md "$STAGE/macos/"
+cp "$RELEASE_NOTES" "$STAGE/macos/"
 ln -s /Applications "$STAGE/macos/Applications"
 xattr -cr "$APP"
 codesign --force --deep --sign - "$APP"
@@ -28,7 +30,7 @@ hdiutil create -volname "Chick Link $VERSION" -srcfolder "$STAGE/macos" \
     -ov -format UDZO "dist/ChickLink-macos-universal-v$VERSION.dmg"
 
 cp target/x86_64-pc-windows-gnu/release/pet-client.exe "$STAGE/windows/"
-cp packaging/RELEASE-0.3.4.md "$STAGE/windows/"
+cp "$RELEASE_NOTES" "$STAGE/windows/"
 cp pet-client/assets/fonts/LICENSE.txt pet-client/assets/fonts/AUTHORS.txt \
     pet-client/assets/fonts/README.md "$STAGE/windows/font-licenses/"
 (cd "$STAGE/windows"; zip -qr "$STAGE/windows.zip" .)

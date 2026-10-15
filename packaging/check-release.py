@@ -1,14 +1,15 @@
-"""Verify public v0.3.4 archives do not contain private connection artifacts."""
+"""Verify public release archives do not contain private connection artifacts."""
 
 import json
 from pathlib import Path
+import tomllib
 
 from public_archive import check_archive
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
-VERSION = "0.3.4"
+VERSION = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
 
 
 def known_private_tokens() -> tuple[bytes, ...]:

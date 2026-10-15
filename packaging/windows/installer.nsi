@@ -1,4 +1,8 @@
 Unicode true
+!ifdef NSIS_MAX_STRLEN
+  !undef NSIS_MAX_STRLEN
+!endif
+!define NSIS_MAX_STRLEN 8192
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "x64.nsh"
@@ -9,7 +13,12 @@ Unicode true
 !ifndef OUTPUT
   !error "OUTPUT must be supplied by build-installer.sh"
 !endif
-!define VERSION "0.3.4"
+!ifndef VERSION
+  !error "VERSION must be supplied by build-installer.sh"
+!endif
+!ifndef VI_VERSION
+  !error "VI_VERSION must be supplied by build-installer.sh"
+!endif
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ChickLink"
 !define RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
 Name "Chick Link ${VERSION}"
@@ -22,10 +31,10 @@ SetDatablockOptimize on
 AllowSkipFiles off
 ShowInstDetails show
 ShowUninstDetails show
-VIProductVersion "0.3.4.1"
+VIProductVersion "${VI_VERSION}"
 VIAddVersionKey "ProductName" "Chick Link"
 VIAddVersionKey "FileDescription" "Chick Link per-user installer"
-VIAddVersionKey "FileVersion" "0.3.4.1"
+VIAddVersionKey "FileVersion" "${VI_VERSION}"
 VIAddVersionKey "LegalCopyright" "Chick Link contributors"
 
 !define MUI_ABORTWARNING
@@ -52,7 +61,7 @@ Section "Chick Link" SEC_MAIN
   SetOutPath "$INSTDIR"
   SetOverwrite on
   ; A locked running executable must be retried or cancelled, never skipped.
-  File /oname=pet-client.exe "${ROOT}/dist/ChickLink-windows-x64-v0.3.4.exe"
+  File /oname=pet-client.exe "${ROOT}/dist/ChickLink-windows-x64-v${VERSION}.exe"
   File "${ROOT}/packaging/WINDOWS-INSTALL.md"
   SetOutPath "$INSTDIR\font-licenses"
   File "${ROOT}/pet-client/assets/fonts/LICENSE.txt"

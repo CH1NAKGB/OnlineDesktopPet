@@ -4,17 +4,19 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 
 root = Path(__file__).resolve().parents[2]
 dist = root / "dist"
-payload_hash = hashlib.sha256((dist / "ChickLink-windows-x64-v0.3.4.exe").read_bytes()).digest()
+version = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["package"]["version"]
+payload_hash = hashlib.sha256((dist / f"ChickLink-windows-x64-v{version}.exe").read_bytes()).digest()
 identities = {
     role: json.loads((dist / "cloud-20260912" / role / "chicklink-connection.json").read_text())
     for role in ("mac", "windows")
 }
 for private in (False, True):
-    installer = (dist / "private-v0.3.4/ChickLink-Setup-Private-v0.3.4.exe" if private
-                 else dist / "ChickLink-Setup-v0.3.4.exe")
+    installer = (dist / f"private-v{version}/ChickLink-Setup-Private-v{version}.exe" if private
+                 else dist / f"ChickLink-Setup-v{version}.exe")
     with tempfile.TemporaryDirectory(prefix="chicklink-installer-check-") as folder:
         result = subprocess.run(["7zz", "x", "-y", "-o" + folder, str(installer)],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
