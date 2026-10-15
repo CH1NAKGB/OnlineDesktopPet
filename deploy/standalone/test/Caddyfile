@@ -8,7 +8,7 @@
 
 :39991 {
 	tls /opt/chicklink-test/secrets/tls-cert.pem /opt/chicklink-test/secrets/tls-key.pem
-	@relay path /ws /healthz
+    @relay path /ws /healthz /version
 	handle @relay {
 		reverse_proxy 127.0.0.1:18081 {
 			header_up X-ChickLink-Client-IP {http.request.remote.host}

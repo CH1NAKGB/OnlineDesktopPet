@@ -8,6 +8,12 @@
 
 生产 `relationships.json`、新 TLS 证书/私钥已在用户明确允许 Workbench/OSS 中转后复制到桌面受限目录，与服务器哈希一致。RSA 私钥和 token 映射的本机旧有副本也与服务器一致。2026-10-15 已用桌面 RSA/令牌/配对副本在本机回环端口启动隔离中继并通过健康检查，且新 TLS 证书与私钥匹配。桌面目录仍未加密、仍在同一台电脑上；新 Lego 生产 ACME 账号私钥和未来账号库不在其中，异地离线恢复尚未完成。
 
+## 生产监控准备（尚未启用）
+
+新中继源码新增 `GET /version`，独立 Caddy 配置将其转发至回环中继。定时 workflow `relay-monitor.yml` 每日两次检查公网 TLS 剩余天数（低于 30 天失败）、`/healthz` 和 `/version` 与预期版本；失败时通过 GitHub Issue 提醒 `@CH1NAKGB`，同类未关闭告警不重复创建。
+
+当前线上旧中继没有 `/version`，且离线加密备份尚未验收，因此**不得启用定时检查或部署新中继来凑监控验收**。workflow 以仓库变量 `CHICKLINK_MONITOR_ENABLED=true` 才运行定时检查；启用前还须设置 `CHICKLINK_EXPECTED_VERSION` 为实际部署的中继版本，并从公网确认 `/version` 返回该值。手动 `simulate_failure=true` 只验证告警链路，不访问生产。告警在仓库 Issues 和 Actions 运行记录查看；由仓库所有者处理，问题解决后关闭对应 Issue。没有收到通知的实际证据前，本项保持未验收。
+
 2026-09-12：中继及 HTTPS 已运行，公网 TLS 和 RSA/AES 登录/心跳验证通过。
 同日已部署配对持久化升级，生产 unit 的 RELAY_STATE_PATH 已核对，两项专用服务 active，公网健康检查通过。备份：/opt/chicklink/backups/state-upgrade-20260912185915。
 

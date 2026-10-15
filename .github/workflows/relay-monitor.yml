@@ -1,0 +1,59 @@
+name: Relay production monitor
+on:
+  schedule:
+    - cron: '10 0,12 * * *'
+  workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: Exercise the failure notification without probing production
+        required: false
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: chicklink-production-monitor
+  cancel-in-progress: false
+jobs:
+  check:
+    if: vars.CHICKLINK_MONITOR_ENABLED == 'true' || inputs.simulate_failure == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check TLS, health and deployed relay version
+        if: inputs.simulate_failure != true
+        env:
+          CHICKLINK_EXPECTED_VERSION: ${{ vars.CHICKLINK_EXPECTED_VERSION }}
+        run: python3 deploy/tests/monitor-production.py
+      - name: Exercise failure notification
+        if: inputs.simulate_failure == true
+        run: |
+          echo 'Intentional monitor failure; no production request was sent.'
+          exit 1
+      - name: Open a deduplicated alert issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MONITOR_TEST: ${{ inputs.simulate_failure }}
+        run: |
+          set -euo pipefail
+          if [ "$MONITOR_TEST" = 'true' ]; then
+            title='[monitor test] Chick Link alert delivery'
+          else
+            title='[monitor] Chick Link production check failed'
+          fi
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+            --json number,title --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+          if [ -n "$existing" ]; then
+            echo "Existing alert issue #$existing remains open."
+            exit 0
+          fi
+          cat > alert-body.md <<EOF
+          @CH1NAKGB Please check the Chick Link production monitor.
+
+          Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          This issue contains no credentials or private user data.
+          EOF
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file alert-body.md

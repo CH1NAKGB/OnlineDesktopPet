@@ -155,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/version", get(|| async { env!("CARGO_PKG_VERSION") }))
         .route("/ws", get(ws_handler))
         .with_state(state);
     let address: SocketAddr = std::env::var("BIND_ADDR")
