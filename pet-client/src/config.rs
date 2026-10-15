@@ -77,8 +77,17 @@ impl ClientConfig {
                 path.display()
             );
         }
+        validate_discovery_security(&config)?;
         Ok(config)
     }
+}
+
+fn validate_discovery_security(config: &ClientConfig) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !config.discover_lan_relay || config.server_rsa_public_key_path.is_some(),
+        "LAN 自动发现需要预置中继 RSA 公钥；请关闭自动发现或配置公钥"
+    );
+    Ok(())
 }
 
 fn validate_connection(settings: &ConnectionSettings) -> anyhow::Result<()> {
@@ -108,6 +117,15 @@ mod connection_tests {
         assert!(validate_connection(&settings).is_err());
         settings.relay_url = "ws://user:secret@localhost/ws".into();
         assert!(validate_connection(&settings).is_err());
+    }
+
+    #[test]
+    fn lan_discovery_requires_pinned_key() {
+        let mut config = ClientConfig::default();
+        config.discover_lan_relay = true;
+        assert!(validate_discovery_security(&config).is_err());
+        config.server_rsa_public_key_path = Some(PathBuf::from("relay-public.pem"));
+        assert!(validate_discovery_security(&config).is_ok());
     }
 }
 

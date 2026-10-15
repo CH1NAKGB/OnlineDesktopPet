@@ -15,9 +15,12 @@ export ALICLOUD_POLLING_INTERVAL=5
 export ALICLOUD_HTTP_TIMEOUT=20
 export GOMEMLIMIT=160MiB GOMAXPROCS=1
 server=letsencrypt
+account_id=chicklink-cert
 directory=https://acme-v02.api.letsencrypt.org/directory
 if [ "$mode" = staging ]; then
   server=letsencrypt-staging
+  # A previous interrupted staging run left an unregistered account key.
+  account_id=chicklink-cert-staging
   directory=https://acme-staging-v02.api.letsencrypt.org/directory
 fi
 # Fail before DNS changes when the CA cannot be reached from this host.
@@ -26,7 +29,7 @@ if ! curl --fail --silent --show-error --connect-timeout 8 --max-time 20 \
   echo 'ACME endpoint unreachable; current certificate and TLS service unchanged.' >&2
   exit 1
 fi
-/opt/chicklink/bin/lego run --accept-tos --account-id chicklink-cert \
+/opt/chicklink/bin/lego run --accept-tos --account-id "$account_id" \
   --domains pet.narendra.cn --server "$server" --path "$base/$mode" \
   --dns alidns --http-timeout 30 --renew-days 30 --no-random-sleep
 if [ "$mode" = production ]; then

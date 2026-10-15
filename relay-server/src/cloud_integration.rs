@@ -78,7 +78,7 @@ impl Relay {
             unpair_requests: Arc::default(),
             unpair_notifications: Arc::default(),
             display_names: Arc::default(),
-            encryption_private_key: Some(key.clone()),
+            encryption_private_keys: Some(Arc::new(vec![(*key).clone()])),
             relationship_store: persistence::Store::new(Some(directory.0.join("partners.json"))),
             cloud: Some(Arc::new(cloud)),
             cloud_gate: Arc::new(tokio::sync::Semaphore::new(1)),

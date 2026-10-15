@@ -13,6 +13,7 @@
 | `RELAY_CLOUD_DB` | SQLite 文件路径。建议绝对路径、独立的本机磁盘目录；父目录须事先创建，服务账号须能创建数据库、`-wal` 和 `-shm` 文件。不要放在共享网络文件系统上。 |
 | `RELAY_CLOUD_KEY_PATH` | 文件内容必须恰好为 **32 个随机原始字节**，不是 64 字符十六进制、Base64、口令或带换行文本。启用账号时必填。 |
 | `RELAY_RSA_PRIVATE_KEY_PATH` | 必须可读、可解析为 **PKCS#8 PEM RSA 私钥，至少 2048 位**。账号连接强制经过 RSA 握手；测试示例使用 3072 位。 |
+| `RELAY_RSA_PREVIOUS_PRIVATE_KEY_PATH` | 可选的过渡期旧私钥，仅在有主私钥时使用。轮换步骤见 `KEY-ROTATION.md`；旧钥泄露时不能继续启用。 |
 | `RELAY_REQUIRE_ENCRYPTION=true` | 独立部署保留此设置，缺少 RSA 私钥时拒绝启动。 |
 | `RELAY_ACCESS_TOKENS_PATH` | 原预置 token 到旧 user ID 的 JSON 映射。若配置，文件必须非空；token 为 32..512 字节，user ID 最长 64 字节且只含 ASCII 字母、数字、`-`、`_`、`.`。迁移时保留原映射。 |
 | `RELAY_REQUIRE_PROVISIONED_TOKENS=true` | 独立部署保留此设置。它要求加载预置 token 文件，**不是账号注册邀请制**；新账号注册并不要求提供旧 token。 |

@@ -1,5 +1,13 @@
 # 阿里云独立部署实况
 
+## 2026-10-15 证书续期现状
+
+服务器 ACME 出站访问已恢复。`chicklink-cert-staging.service` 完成 DNS-01 测试签发与清理；生产签发、证书链及私钥匹配校验、Caddy 配置校验和 TLS 切换均完成。公网 `https://pet.narendra.cn:18443/healthz` 返回 `ok`，外部 TLS 握手显示新证书到期 **2027-01-13 09:50:43 UTC**；中继和 TLS 服务均为 active。
+
+`chicklink-cert-renew.service/timer` 已安装并启用，每日 04:00、16:00 检查。2026-10-15 手动复跑显示 Lego 跳过未到窗口的续期，部署脚本确认证书未变且未重启 TLS。首次计划执行为 2026-10-16 04:00 CST。下面的 2026-09-14 记录是历史故障过程，不再代表当前状态。
+
+生产 `relationships.json`、新 TLS 证书/私钥已在用户明确允许 Workbench/OSS 中转后复制到桌面受限目录，与服务器哈希一致。RSA 私钥和 token 映射的本机旧有副本也与服务器一致。2026-10-15 已用桌面 RSA/令牌/配对副本在本机回环端口启动隔离中继并通过健康检查，且新 TLS 证书与私钥匹配。桌面目录仍未加密、仍在同一台电脑上；新 Lego 生产 ACME 账号私钥和未来账号库不在其中，异地离线恢复尚未完成。
+
 2026-09-12：中继及 HTTPS 已运行，公网 TLS 和 RSA/AES 登录/心跳验证通过。
 同日已部署配对持久化升级，生产 unit 的 RELAY_STATE_PATH 已核对，两项专用服务 active，公网健康检查通过。备份：/opt/chicklink/backups/state-upgrade-20260912185915。
 

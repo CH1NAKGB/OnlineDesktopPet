@@ -2,12 +2,12 @@
 
 目标：阿里云 47.94.13.254，SSH 22，宝塔 Nginx。现有 80/443/8080 不占用、不停止。
 公网入口 `wss://pet.narendra.cn:18443/ws`；中继后端 `127.0.0.1:18080`。
-实际部署尚需 SSH 用户/密钥登录信息及目标机端口、Docker、证书状态确认。
+此文件是尚未实施的宝塔替代方案。当前生产环境使用独立 Caddy 与中继，状态和证书续期步骤见 [standalone/README.md](standalone/README.md)。
 
 1. 在 DNS 管理处设置 pet.narendra.cn 的 A 记录为 47.94.13.254。域名不会隐藏端口，客户端必须带 :18443。
 2. 在宝塔申请/导入覆盖该域名的有效证书。优先 DNS 验证，不需要占用 80/443；确认自动续期。
 3. 将服务器源码包放到独立目录。首次部署复制 `deploy/baota.env.example` 为 `deploy/.env`；已有部署先备份配置和 secrets，不覆盖凭据。
-4. 导入已有 v0.3.3 镜像后运行 `sh deploy/relay.sh start`，或用 `up` 编译。当前协议仍兼容该镜像。
+4. 仅在隔离测试环境中使用配套版本的镜像与源码包；导入镜像后运行 `sh deploy/relay.sh start`，或用 `up` 编译。不要拿历史镜像运行当前账号源码。
 5. 将 `pet.narendra.cn.nginx.conf` 的 server 块加入宝塔 Nginx http 配置。核对真实证书路径，先执行宝塔 Nginx 的 `-t` 检查，再重载。
 6. 宝塔防火墙、系统防火墙及阿里云安全组放行 TCP 18443。18080 仅本机监听，不应公网开放。
 7. 从外网检查 `https://pet.narendra.cn:18443/healthz`，再用两个不同令牌的客户端配对测试。
@@ -36,4 +36,4 @@ Windows 将 `chicklink-connection.json` 放在 pet-client.exe 旁；macOS 可放
 CHICK_DISCOVER_LAN=true/false 可覆盖搜索开关；云端默认关闭发现，避免误连测试中继。
 双击或开机自启现在可以重新加载这份配置。移动程序/配置后确认相对公钥仍可找到。
 
-本说明准备了部署材料，不表示已经登录或修改过阿里云主机。
+本说明仅记录宝塔替代方案；阿里云主机已采用独立部署，不按本文操作。

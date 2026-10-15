@@ -4,6 +4,7 @@ SOURCE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TEST_DIR=$(mktemp -d /tmp/chick-relay-smoke.XXXXXX)
 echo "Isolated test directory: $TEST_DIR"
 mkdir -p "$TEST_DIR/deploy" "$TEST_DIR/bin"
+cp "$SOURCE/../Cargo.toml" "$TEST_DIR/Cargo.toml"
 cp "$SOURCE/relay.sh" "$SOURCE/init-encrypted-direct.sh" "$SOURCE/.env.example" \
     "$SOURCE/docker-compose.encrypted-direct.yml" "$TEST_DIR/deploy/"
 cp "$SOURCE/tests/fake-docker.sh" "$TEST_DIR/bin/docker"

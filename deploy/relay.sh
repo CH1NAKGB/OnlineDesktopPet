@@ -3,6 +3,13 @@ set -eu
 
 DEPLOY_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$DEPLOY_DIR"
+CHICKLINK_VERSION=$(awk '
+  /^\[workspace.package\]$/ { in_package=1; next }
+  /^\[/ { in_package=0 }
+  in_package && /^version = "/ { gsub(/"/, "", $3); print $3; exit }
+' "$DEPLOY_DIR/../Cargo.toml")
+[ -n "$CHICKLINK_VERSION" ] || { echo "Cannot read workspace version from Cargo.toml" >&2; exit 1; }
+export CHICKLINK_VERSION
 ACTION=${1:-help}
 case "$ACTION" in
     init|up|start|status|logs|stop|check) ;;

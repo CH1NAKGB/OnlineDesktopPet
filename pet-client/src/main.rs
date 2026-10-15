@@ -1312,6 +1312,9 @@ impl ApplicationHandler for PetApp {
                     }
                 }
                 NetworkEvent::Error(message) => {
+                    if message.contains("RSA 加密") || message.contains("加密握手") {
+                        self.show_bubble(message.clone(), Duration::from_secs(10));
+                    }
                     if let Some(chat_window) = self.chat_window.as_mut() {
                         chat_window.set_status(message);
                     }
@@ -1456,6 +1459,14 @@ mod network {
                 None => None,
             };
             let mut account = super::cloud_client::load_session().filter(|session| session.server_url == relay_url);
+            if secure_channel.is_none() && (!config.access_token.is_empty() || account.is_some()) {
+                let _ = events.send(super::NetworkEvent::Error(
+                    "此连接没有 RSA 加密，已停止发送令牌；请检查中继地址和公钥配置".into(),
+                ));
+                let _ = events.send(super::NetworkEvent::Disconnected);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
             let hello = ClientEvent::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 access_token: config.access_token.clone(),
@@ -1770,6 +1781,7 @@ mod network {
         secure_channel: Option<&SecureChannel>,
         event: &ClientEvent,
     ) -> anyhow::Result<()> {
+        validate_event_encryption(secure_channel, event)?;
         let json = if let Some(channel) = secure_channel {
             let frame = channel
                 .encrypt(event)
@@ -1784,6 +1796,61 @@ mod network {
         )
         .await??;
         Ok(())
+    }
+
+    fn event_requires_encryption(event: &ClientEvent) -> bool {
+        matches!(event, ClientEvent::Cloud { .. })
+            || matches!(event, ClientEvent::Hello { access_token, .. } if !access_token.is_empty())
+    }
+
+    fn validate_event_encryption(
+        secure_channel: Option<&SecureChannel>,
+        event: &ClientEvent,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            secure_channel.is_some() || !event_requires_encryption(event),
+            "refusing to send credentials without RSA encryption"
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn credential_events_require_encryption() {
+        let hello = ClientEvent::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            access_token: "secret".into(),
+            device_id: "device".into(),
+            display_name: None,
+        };
+        assert!(validate_event_encryption(None, &hello).is_err());
+        let requests = [
+            CloudRequest::Register {
+                username: "alice".into(),
+                password: "secret".into(),
+                device_id: "device".into(),
+                legacy_token: None,
+            },
+            CloudRequest::Login {
+                username: "alice".into(),
+                password: "secret".into(),
+                device_id: "device".into(),
+            },
+            CloudRequest::Recover {
+                username: "alice".into(),
+                recovery_code: "code".into(),
+                new_password: "new secret".into(),
+                device_id: "device".into(),
+            },
+            CloudRequest::Resume {
+                token: "session".into(),
+                device_id: "device".into(),
+            },
+        ];
+        for request in requests {
+            assert!(validate_event_encryption(None, &ClientEvent::Cloud { request }).is_err());
+        }
+        assert!(validate_event_encryption(None, &ClientEvent::Ping).is_ok());
     }
 
     async fn connect_to_relay(

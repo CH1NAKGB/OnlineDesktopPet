@@ -15,11 +15,17 @@ sh deploy/relay.sh up
 
 ## 低配置服务器：使用预编译镜像
 
-v0.3.3 Release 已附带 `ChickLink-relay-linux-x64-v0.3.3.tar.gz`，先下载它与服务端
-源码包，解压源码包后进入目录，运行：
+预编译镜像必须与服务端源码包版本一致。v0.3.3 Release 已附带
+`ChickLink-relay-linux-x64-v0.3.3.tar.gz`；使用它时须配套 v0.3.3 源码包。
+v0.3.4 tag 的旧源码包仍把 Compose 镜像名写成 `0.3.3`，所以即使重新构建
+v0.3.4 镜像，直接用旧包执行 `start` 也会找错标签。当前仓库已修复这两个脚本；
+如仍使用旧 v0.3.4 源码包，请执行 `up` 从该包的源码构建，不要把新镜像改名成
+`0.3.3` 来掩盖版本不匹配。
+
+使用版本匹配且已修正部署脚本的源码包时，解压后进入目录运行：
 
 ```sh
-docker load -i /镜像下载目录/ChickLink-relay-linux-x64-v0.3.3.tar.gz
+docker load -i /镜像下载目录/ChickLink-relay-linux-x64-v对应版本.tar.gz
 sh deploy/relay.sh start
 ```
 

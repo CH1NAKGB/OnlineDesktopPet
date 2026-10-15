@@ -1,15 +1,30 @@
 # Chick Link 接手文档
 
 > 面向新对话、新 AI 与协作开发者。先读本文件，再核对当前代码和 Git 状态。
-> 更新日期：2026-10-12（Asia/Shanghai）。产品名与桌宠形象保持 Chick Link 小鸡。GitHub v0.3.4 是最新公开稳定版；当前工作区包含尚未发布的账号及云同步改动。
+> 更新日期：2026-10-15（Asia/Shanghai）。产品名与桌宠形象保持 Chick Link 小鸡。GitHub v0.3.4 是最新公开稳定版；账号与云同步源码已在公开的 main，尚无包含它们的正式安装包或生产部署。
 
-## 2026-10-12 未发布改动
+## 2026-10-15 当前接手要点
+
+- v0.4 路线图 P0-1 回归：`cargo fmt --all --check`、`cargo check --workspace --locked`、`cargo test --workspace --locked`、Windows GNU 目标 `cargo check`、`sh deploy/tests/relay-smoke.sh` 均通过。测试结果为客户端 42 通过/1 项真实音频设备测试忽略、中继 27 通过、协议 9 通过。双 RSA 私钥隔离中继测试让旧公钥与新公钥客户端分别握手并双向发送事件；无加密通道下注册、登录、恢复、Resume 在发送前被拒绝。实际启动测试：`CHICK_DISCOVER_LAN=true` 且无公钥以“LAN 自动发现需要预置中继 RSA 公钥”退出。账号连接缺 RSA 时聊天状态栏与桌宠气泡提示错误。沙盒内回环端口测试需允许本机监听；`block v0.1.6` future-incompat 警告仍在。部署 smoke 仅用假 Docker 验证命令连接，未验证真实容器运行。
+- `0.3.3` 文档检索结果仅保留历史版本记录：`offread.md`、`ROADMAP-v0.4.md`、`deploy/centos7.md`、`deploy/QUICKSTART.md`、`deploy/standalone/README.md`、`packaging/LAN-TEST.md`、`packaging/TESTING.md`、`third_party/open_source_candidates/INTEGRATION_CHECKLIST.md`。当前工作流、脚本、Compose 版本均取 v0.3.4。
+
+- 本轮修改开始前，`main` 与 `origin/main` 同步；提交 `74d3add` 已公开。此后以实时 `git status` 和 `git log` 为准，不能沿用下文旧的“未提交改动”判断。
+- 2026-10-15 已修复证书续期：服务器 ACME 出站恢复、staging DNS-01 成功、生产新证书已切换；外部验证线上证书到期 **2027-01-13 09:50:43 UTC**，HTTPS 健康检查通过。`chicklink-cert-renew.timer` 已启用，每天 04:00 和 16:00 检查；当日手动重跑确认未到续期窗口时不重新签发或重启 TLS。旧的本机证书副本仍于 2026-12-10 到期，不要把它当作线上现状。
+- 生产 RSA 私钥是旧客户端固定公钥的信任根。本轮源码新增双私钥过渡支持，生产尚未部署；轮换步骤见 `deploy/standalone/KEY-ROTATION.md`。旧钥丢失或泄露后，当前已装客户端不能自动安全地接受新钥。
+- `deploy/standalone/CLOUD-ACCOUNTS.md` 的账号库备份步骤仍待执行。2026-10-15 用户明确允许 Workbench 经阿里云 OSS 中转后，已把生产 `relationships.json` 和新 TLS 证书/私钥下载到桌面受限目录；它们与服务器哈希一致。本机旧有 RSA 私钥和 token 映射也与服务器一致，且用桌面副本在回环端口完成了中继启动恢复检查。桌面目录仍是**未加密、同机临时副本**；新 Lego 生产 ACME 账号私钥、未来账号库与存储 key 不在其中，异地离线恢复尚未完成。NAS 目前暂停同步。
+- 云历史、待发送队列和会话令牌在客户端本地以明文文件保存，只有文件权限隔离；服务端的加密存储不覆盖客户端文件，也不是端到端加密。
+- 客户端已拒绝无 RSA 握手的用户发起云账号请求；本轮进一步阻止无加密连接发送任何云请求或旧版访问令牌，并要求 LAN 自动发现配置预置 RSA 公钥。LAN 测试包已有该公钥。
+- 账号窗口现在明确提示服务器可读消息、本机账号内容仍以明文文件保存；本地文件加密尚未实现，不能把提示当成加密措施。
+- 2026-10-15 完整 workspace 自动回归通过（客户端 42 通过、1 项真实音频设备测试忽略；中继 27 通过；协议 9 通过），Windows GNU 目标 `cargo check` 通过。Windows/macOS 真机安装及 128 MiB 生产资源限制测试仍未完成。`block v0.1.6` 仍有 future-incompat 警告。
+- 公开注册与邀请码目前不在用户需求范围；账号库仍未在生产启用。账号上线前仍须完成备份恢复、双机验收和资源限制下的测试。
+
+## 2026-10-12 开发记录（历史快照）
 
 - 名称保持 **Chick Link**，桌宠保持原有小鸡绘制；本次未改变产品名或形象。
 - 本地包含账号注册/登录、一次性恢复码、多设备账号、加密 SQLite 云历史、PNG/JPEG 表情、离线同步和待发送队列的开发改动。
 - 账号开发线尚未替换生产服务；部署前先阅读 `deploy/standalone/CLOUD-ACCOUNTS.md`。
 
-## 2026-09-19 当前事实
+## 2026-09-19 开发记录（历史快照，以顶部 2026-10-15 状态为准）
 
 ### 进度结论
 
@@ -39,7 +54,7 @@
 
 ### 协作与编辑纪律
 
-- 当前工作区有大量未提交改动，先看 `git status --short` 和 `git diff`，不要重置、覆盖或清理未知改动。
+- 每次接手先看 `git status --short` 和 `git diff`，不要重置、覆盖或清理未知改动。
 - 手工修改使用 `apply_patch`；不要把密钥、令牌、恢复码、RSA 私钥、云存储 key、聊天内容写进 Git、GitHub 或 NAS。
 - 不运行 NAS 上的可执行文件；NAS 仅用于同步源码/构建包，不能替代本地验证环境。
 - 不重启、替换或修改宝塔、Nginx、MySQL 和其他业务；线上部署必须只操作 `/opt/chicklink` 专用文件和已授权端口。
@@ -47,7 +62,7 @@
 ### v0.3.4 正式使用安排
 
 - 新增 Windows NSIS 一键安装器：packaging/windows/build-installer.sh public|private。
-  公共 Setup.exe 不含令牌；私用 Setup 在 dist/private-v0.3.4，仅同步 NAS，不能上传 GitHub。
+  公共 Setup.exe 不含令牌；私用 Setup 在 dist/private-v0.3.4，当前不执行 NAS 同步，不能上传 GitHub。
   默认当前用户安装，无需管理员权限，升级/卸载保留 APPDATA。见 packaging/WINDOWS-INSTALL.md。
   安装器编译及载荷检查不等于 Windows 真机安装/卸载验收。
 
@@ -166,7 +181,7 @@ git remote -v
 
 | 路径 | 职责 |
 | --- | --- |
-| `Cargo.toml` / `Cargo.lock` | Rust workspace；三个 crate 版本现为 0.3.3；edition 2024 |
+| `Cargo.toml` / `Cargo.lock` | Rust workspace；三个 crate 版本现为 0.3.4；edition 2024 |
 | `pet-client/src/main.rs` | winit 事件循环、菜单/托盘、拖拽、共享动作、网络线程和消息分派 |
 | `pet-client/src/chat_window.rs` | 独立不透明 egui 聊天/配对窗口、主题、输入、设置、解除配对弹窗、字体 |
 | `pet-client/src/renderer.rs` | 非 Windows 桌宠 wgpu 渲染与气泡文字 |
@@ -301,8 +316,8 @@ git remote -v
 
 | 环境变量 | 用途 / 默认 |
 | --- | --- |
-| CHICK_RELAY_URL | 回退中继 URL；默认 ws://127.0.0.1:8080/ws |
-| CHICK_ACCESS_TOKEN | 默认 dev:chick-user；云端必须传个人随机令牌 |
+| CHICK_RELAY_URL | 默认 wss://pet.narendra.cn:18443/ws |
+| CHICK_ACCESS_TOKEN | 默认空；旧版令牌按个人配置 |
 | CHICK_DEVICE_ID | 默认 local-desktop |
 | CHICK_PARTNER_ID | 旧开发辅助入口；正常使用配对码流程 |
 | CHICK_PAIRING_CODE | 覆盖生成/本地读取的配对码，用于隔离测试 |
@@ -311,8 +326,7 @@ git remote -v
 | CHICK_TLS_CA_CERT_PATH | WSS 额外信任的证书/CA PEM 路径 |
 | CHICK_OPEN_CHAT | 设置为 1 可启动时直接打开配对/聊天窗口 |
 
-`discover_lan_relay` 当前默认 true，没有完整设置 UI；每轮连接前最多搜索 1 秒。
-因此显式 URL 也仍可能被发现的 LAN 中继优先替代；排查错误目标时检查此分支。
+`discover_lan_relay` 当前默认 false，没有完整设置 UI。启用时每轮连接前最多搜索 1 秒，发现的 LAN 中继仍会优先于显式 URL；新版客户端要求同时预置中继 RSA 公钥，并拒绝向无 RSA 连接发送令牌或云请求。
 
 本地数据：
 
@@ -336,6 +350,8 @@ git remote -v
 - 不要求用户在聊天里贴 SSH 私钥/密码。没有远程访问前不能声称已经部署。
 
 ## 11. 服务端快速操作
+
+以下是旧版 Docker 部署记录。当前生产为独立 Caddy + 中继，不使用 Docker；新部署见 [deploy/standalone/README.md](deploy/standalone/README.md)。旧镜像须与当时的源码包配套，不能直接用于当前工作区。
 
 完整说明在 [deploy/QUICKSTART.md](deploy/QUICKSTART.md)。先安装可用 Docker/Compose 与 OpenSSL。
 低配置机推荐下载 Release 的服务端源码 ZIP 与预编译镜像 tar.gz。
@@ -369,7 +385,7 @@ sh deploy/relay.sh stop
 - start：初始化 + `--no-build`；需要事先导入匹配版本镜像。
 - check：容器内请求 /healthz；只证明服务存活，不证明公网连通或双端配对成功。
 - 兼容 docker compose 与 docker-compose，前提是具体 Compose 版本支持配置中的字段。
-- 镜像标签目前硬编码 `chicklink-relay:0.3.3`，更新版本时必须与 workflow 同步。
+- `relay.sh` 从 Cargo.toml 读取版本并传给 Compose；手动直接运行 Compose 时，核对 .env 的 `CHICKLINK_VERSION` 与源码版本一致。镜像 workflow 只接受明确指定且与源码版本匹配的现有 tag。
 
 密钥文件生成在 `deploy/secrets/`：
 
@@ -429,18 +445,18 @@ CHICK_ACCESS_TOKEN=dev:owner-a CHICK_PAIRING_CODE=7KQ3M9XZ CHICK_OPEN_CHAT=1 car
 sh packaging/release.sh
 ```
 
-脚本固定版本号 0.3.3，构建三个客户端 target，lipo 合并 Mac 双架构，/tmp staging
+脚本固定版本号 0.3.4，构建三个客户端 target，lipo 合并 Mac 双架构，/tmp staging
 清除扩展属性后临时签名，生成 DMG、Windows ZIP、服务端源码 ZIP 及三包校验文件。
 它不产生 Linux 镜像；如果后来加入镜像，必须重新生成包含四包的 SHA256SUMS。
 
 Linux 镜像构建：
 
 ```sh
-gh workflow run relay-image.yml --ref main
+gh workflow run relay-image.yml --ref main -f release_tag=v0.3.4
 gh run list --workflow relay-image.yml
 # 将 RUN_ID 替换为本次运行编号
 gh run watch RUN_ID --exit-status
-gh run download RUN_ID --name relay-linux-x64-v0.3.3 --dir dist
+gh run download RUN_ID --name relay-linux-x64-v0.3.4 --dir dist
 ```
 
 workflow 将运行 `relay.sh up` / `check`，docker save + gzip，再上传 Actions artifact。
@@ -517,7 +533,7 @@ cargo check --manifest-path third_party/open_source_candidates/examples/Cargo.to
 - 之前出现过自动审批因额度限制拒绝；后续用户说继续后重试成功。这是历史情况，不代表当前仍受限。
 - 本接手文件后续也应随事实变化更新，尤其版本、部署状态、已知缺陷和验收结果。
 
-## 2026-09-14 续期接手补充
+## 2026-09-14 续期接手补充（历史快照，续期已于 2026-10-15 完成）
 
 自动续期仍未验收，不要报告部署完成。用户已提供专用 chicklink-cert 凭据，
 本机验证子域可读、主域被拒绝；凭据已安装服务器 root 私密目录。
@@ -526,14 +542,14 @@ HTTPS 接口超时而停止。AliDNS API 可达；未切换当前证书（到期
 线上健康正常，其他业务未重启。正式续期 unit/timer 和部署脚本仅本地草稿，
 未上传启用。详细路径、验证结果及下一步见 deploy/standalone/README.md。
 先解决出站网络再验证 staging，不能将保存凭据等同于续期成功；绝不把 DNS
-凭据、ACME 账号私钥同步到 NAS/GitHub。此补充优先于前文旧进度。
+凭据、ACME 账号私钥同步到 NAS/GitHub。当前状态以本文顶部和 `deploy/standalone/README.md` 为准。
 
 ## 17. 给下一位 AI 的启动提示
 
 可以将下面这段作为新对话首条消息：
 
 > 请先阅读仓库根目录 offread.md，并核对 git status、最近提交及相关代码。
-> 项目是 Chick Link 原生 Rust 双端桌宠，已发布 v0.3.3。保留 RSA/AES、Windows
+> 项目是 Chick Link 原生 Rust 双端桌宠，最新公开稳定版 v0.3.4。保留 RSA/AES、Windows
 > layered-window 透明渲染、原生拖拽、延迟焦点恢复、显式 R10 和主题初始化修复。
-> 按最新网络安排使用新 NAS，不覆盖协作改动，不添加 AI contributor。区分已实现与未验证，
+> NAS 目前暂停同步，不覆盖协作改动，不添加 AI contributor。区分已实现与未验证，
 > 根据我接下来描述的问题继续实施并验证。

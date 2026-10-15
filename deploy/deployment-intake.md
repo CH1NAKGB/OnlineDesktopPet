@@ -2,7 +2,7 @@
 
 ## Recommended topology
 
-Current owner constraints: CentOS 7.9 x64, host ports 80/443/8080 occupied, proposed public port 18080. Use the encrypted-direct configuration and the tested v0.3.3 Linux x64 image for the initial deployment. No actual ECS deployment has been completed yet. See [QUICKSTART.md](QUICKSTART.md) and [offread.md](../offread.md).
+Historical deployment intake, recorded before the ECS deployment. The live service now uses standalone Caddy and the relay on TCP 18443; see [standalone/README.md](standalone/README.md) and [offread.md](../offread.md) for its current state. The Docker setup below is an alternative for an isolated test only.
 
 - Alibaba Cloud ECS: public WSS entrypoint, Caddy, relay server, authentication API later.
 - NAS: backups and future image/media storage. Do not expose SMB to the public internet.

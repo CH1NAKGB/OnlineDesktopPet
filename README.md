@@ -167,4 +167,4 @@ sh deploy/relay.sh up
 
 ## macOS DMG
 
-Release 的 `ChickLink-macos-universal-v0.3.3.dmg` 包含 Apple Silicon 与 Intel 架构，使用临时签名，未做 Apple 公证。Windows x64 ZIP 也未做代码签名。源码构建与发布步骤见 [接手文档](offread.md) 和 `packaging/release.sh`。
+当前公开稳定版为 v0.3.4，包含 Apple Silicon 与 Intel 架构的 macOS DMG；未做 Apple 公证。Windows x64 包也未做代码签名。源码构建与发布步骤见 [接手文档](offread.md) 和 `packaging/release.sh`。

@@ -1,6 +1,11 @@
 name: Relay image
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to build (for example v0.3.4)
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -9,20 +14,39 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+      - name: Verify source tag and version
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(git describe --exact-match --tags HEAD)" = "$RELEASE_TAG"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          test "$RELEASE_TAG" = "v$version"
+          echo "CHICKLINK_VERSION=$version" >> "$GITHUB_ENV"
       - name: Build and test encrypted relay
         run: |
           sh deploy/relay.sh up
           sh deploy/relay.sh check
           docker compose --env-file deploy/.env -f deploy/docker-compose.encrypted-direct.yml ps
+      - name: Tag the tested image with the source version
+        run: |
+          set -euo pipefail
+          tested_image=$(docker compose --env-file deploy/.env -f deploy/docker-compose.encrypted-direct.yml config --images)
+          test "$(printf '%s\n' "$tested_image" | wc -l)" -eq 1
+          docker tag "$tested_image" "chicklink-relay:$CHICKLINK_VERSION"
+          test "$(docker image inspect -f '{{.Id}}' "$tested_image")" = "$(docker image inspect -f '{{.Id}}' "chicklink-relay:$CHICKLINK_VERSION")"
       - name: Export tested image
         run: |
-          docker save chicklink-relay:0.3.3 | gzip > ChickLink-relay-linux-x64-v0.3.3.tar.gz
-          sha256sum ChickLink-relay-linux-x64-v0.3.3.tar.gz > relay-image.sha256
+          docker save "chicklink-relay:$CHICKLINK_VERSION" | gzip > "ChickLink-relay-linux-x64-v$CHICKLINK_VERSION.tar.gz"
+          sha256sum "ChickLink-relay-linux-x64-v$CHICKLINK_VERSION.tar.gz" > relay-image.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: relay-linux-x64-v0.3.3
+          name: relay-linux-x64-v${{ env.CHICKLINK_VERSION }}
           path: |
-            ChickLink-relay-linux-x64-v0.3.3.tar.gz
+            ChickLink-relay-linux-x64-v*.tar.gz
             relay-image.sha256
           retention-days: 7
       - name: Diagnostics

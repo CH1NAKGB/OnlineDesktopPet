@@ -116,7 +116,7 @@ struct AppState {
     /// Offline owners receive the completed unpair result on their next connection.
     unpair_notifications: Arc<RwLock<HashMap<String, String>>>,
     display_names: Arc<RwLock<HashMap<String, String>>>,
-    encryption_private_key: Option<Arc<RsaPrivateKey>>,
+    encryption_private_keys: Option<Arc<Vec<RsaPrivateKey>>>,
     relationship_store: persistence::Store,
     cloud: Option<Arc<cloud::Store>>,
     cloud_gate: Arc<tokio::sync::Semaphore>,
@@ -126,8 +126,8 @@ struct AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    let encryption_private_key = load_encryption_private_key()?;
-    if env_flag("RELAY_REQUIRE_ENCRYPTION") && encryption_private_key.is_none() {
+    let encryption_private_keys = load_encryption_private_keys()?;
+    if env_flag("RELAY_REQUIRE_ENCRYPTION") && encryption_private_keys.is_none() {
         anyhow::bail!("RELAY_REQUIRE_ENCRYPTION is set but no RSA private key was configured");
     }
     let access_tokens = load_access_tokens()?;
@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
         unpair_requests: Arc::default(),
         unpair_notifications: Arc::default(),
         display_names: Arc::default(),
-        encryption_private_key,
+        encryption_private_keys,
         relationship_store,
         cloud: cloud_service::open_store()?,
         cloud_gate: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -243,8 +243,8 @@ async fn serve_socket(state: AppState, socket: WebSocket, peer_ip: std::net::IpA
         return;
     };
     let (mut sink, mut stream) = socket.split();
-    let secure_channel = match &state.encryption_private_key {
-        Some(private_key) => {
+    let secure_channel = match &state.encryption_private_keys {
+        Some(private_keys) => {
             let Ok(Some(Ok(Message::Text(text)))) =
                 tokio::time::timeout(std::time::Duration::from_secs(10), stream.next()).await
             else {
@@ -257,10 +257,19 @@ async fn serve_socket(state: AppState, socket: WebSocket, peer_ip: std::net::IpA
                 warn!("rejected connection without encrypted handshake");
                 return;
             };
-            let Ok(session_key) = decrypt_session_key(private_key, &encrypted_session_key) else {
+            let Some((key_index, session_key)) =
+                private_keys.iter().enumerate().find_map(|(index, key)| {
+                    decrypt_session_key(key, &encrypted_session_key)
+                        .ok()
+                        .map(|session_key| (index, session_key))
+                })
+            else {
                 warn!("rejected connection with invalid encrypted handshake");
                 return;
             };
+            if key_index > 0 {
+                info!("accepted handshake with previous RSA key");
+            }
             Some(SecureChannel::new(session_key))
         }
         None => None,
@@ -876,18 +885,38 @@ async fn sync_presence(state: &AppState, id: &str) {
     }
 }
 
-fn load_encryption_private_key() -> anyhow::Result<Option<Arc<RsaPrivateKey>>> {
+fn load_encryption_private_keys() -> anyhow::Result<Option<Arc<Vec<RsaPrivateKey>>>> {
     let Some(path) = std::env::var_os("RELAY_RSA_PRIVATE_KEY_PATH") else {
+        anyhow::ensure!(
+            std::env::var_os("RELAY_RSA_PREVIOUS_PRIVATE_KEY_PATH").is_none(),
+            "previous RSA private key requires a primary RSA private key"
+        );
         return Ok(None);
     };
-    let pem = std::fs::read_to_string(&path)?;
-    let private_key = RsaPrivateKey::from_pkcs8_pem(&pem)
-        .map_err(|error| anyhow::anyhow!("invalid RSA private key at {:?}: {error}", path))?;
-    if private_key.n().bits() < 2048 {
-        anyhow::bail!("RSA private key at {:?} must be at least 2048 bits", path);
+    let mut keys = Vec::with_capacity(2);
+    for path in [
+        Some(path),
+        std::env::var_os("RELAY_RSA_PREVIOUS_PRIVATE_KEY_PATH"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let pem = std::fs::read_to_string(&path)?;
+        let private_key = RsaPrivateKey::from_pkcs8_pem(&pem)
+            .map_err(|error| anyhow::anyhow!("invalid RSA private key at {:?}: {error}", path))?;
+        if private_key.n().bits() < 2048 {
+            anyhow::bail!("RSA private key at {:?} must be at least 2048 bits", path);
+        }
+        anyhow::ensure!(
+            !keys
+                .iter()
+                .any(|key: &RsaPrivateKey| key.n() == private_key.n()),
+            "primary and previous RSA private keys must differ"
+        );
+        keys.push(private_key);
+        info!(path = ?path, "application-layer relay encryption key loaded");
     }
-    info!(path = ?path, "application-layer relay encryption enabled");
-    Ok(Some(Arc::new(private_key)))
+    Ok(Some(Arc::new(keys)))
 }
 
 fn load_access_tokens() -> anyhow::Result<Option<Arc<HashMap<String, String>>>> {
@@ -1062,6 +1091,7 @@ mod tests {
     #[tokio::test]
     async fn encrypted_pet_and_message_sync_is_bidirectional_without_echo() {
         let key = Arc::new(RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap());
+        let next_key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
         let token_a = "a".repeat(64);
         let token_b = "b".repeat(64);
         let state = AppState {
@@ -1071,7 +1101,7 @@ mod tests {
             unpair_requests: Arc::default(),
             unpair_notifications: Arc::default(),
             display_names: Arc::default(),
-            encryption_private_key: Some(key.clone()),
+            encryption_private_keys: Some(Arc::new(vec![next_key.clone(), (*key).clone()])),
             relationship_store: persistence::Store::new(None),
             cloud: None,
             cloud_gate: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1090,7 +1120,8 @@ mod tests {
             axum::serve(listener, router).await.unwrap();
         });
         let (mut a, ca) = client(&url, &key, &token_a, "7KQ3M9XZ").await;
-        let (mut b, cb) = client(&url, &key, &token_b, "8KQ3M9XZ").await;
+        // A uses the previous key; B uses the new primary key. Both must exchange events.
+        let (mut b, cb) = client(&url, &next_key, &token_b, "8KQ3M9XZ").await;
         send(
             &mut a,
             &ca,

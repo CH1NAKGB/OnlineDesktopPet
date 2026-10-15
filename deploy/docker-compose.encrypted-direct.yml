@@ -1,6 +1,6 @@
 services:
   relay:
-    image: chicklink-relay:0.3.3
+    image: chicklink-relay:${CHICKLINK_VERSION:?Set CHICKLINK_VERSION to the source version}
     build:
       context: ..
       dockerfile: relay-server/Dockerfile

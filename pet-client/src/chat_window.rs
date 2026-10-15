@@ -1646,6 +1646,11 @@ impl CloudUi {
                     egui::ScrollArea::vertical()
                         .max_height((ctx.screen_rect().height() - 140.0).max(180.0))
                         .show(ui, |ui| {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                "云端可读取消息；本机消息、待发送内容和登录状态目前保存在未加密文件中。",
+                            );
+                            ui.separator();
                             if let Some(session) = &self.session {
                                 ui.label(format!("已登录：{}", session.username));
                                 ui.horizontal(|ui| {
