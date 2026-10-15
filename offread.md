@@ -1,7 +1,15 @@
 # Chick Link 接手文档
 
 > 面向新对话、新 AI 与协作开发者。先读本文件，再核对当前代码和 Git 状态。
-> 更新日期：2026-10-15（Asia/Shanghai）。产品名与桌宠形象保持 Chick Link 小鸡。GitHub v0.3.4 是最新公开稳定版；账号与云同步源码已在公开的 main，尚无包含它们的正式安装包或生产部署。
+> 更新日期：2026-10-16（Asia/Shanghai）。产品名与桌宠形象保持 Chick Link 小鸡。GitHub v0.3.4 是最新公开稳定版；账号与云同步源码已在公开的 main，尚无包含它们的正式安装包或生产部署。
+
+## 2026-10-16 M0 四项修复（代码已验证，真机未验收）
+
+- FIX-1/FIX-3 提交 `6d88eda`：macOS 自更新辅助脚本脱离父进程组；先在同级临时目录复制完整新包，再切换现有应用。EXIT/INT/TERM trap 记录失败并收敛到可启动旧包；旧包清理失败时先隔离坏目录，绝不把 `.bak` 移进它。等待超时、备份或移动失败会写 `update.log` 并尝试重新打开旧应用。新增 `interrupted_copy_restores_runnable_old_app`、`failed_removal_never_nests_backup_in_damaged_app`，连同原有成功/失败替换测试共 4 项通过；提取 HELPER 后用 `/bin/sh -n` 检查通过。
+- FIX-2 提交 `460899f`：采用已定方案 B。新版本进入事件循环满 10 秒、配置已加载且网络线程已启动，marker 仍匹配当前 bundle 时，先把新旧版本号与路径记入 `update.log`，再清理唯一 `.bak`。`preflight()` 允许备份仍在的待验证状态，只拒绝 marker 匹配但备份缺失。新增 `backup_cleanup_waits_for_marker_time_and_subsystems` 与 `preflight_allows_pending_backup_but_rejects_missing_backup`，`self_update::tests` 共 6 项通过。用户看到的小鸡窗口刚出现时，回滚备份还会保留至少 10 秒。
+- FIX-4 提交 `d46bd2a`：窗口坐标改存 `x,y,scale`，旧 `x,y` 按 1.0 兼容；按保存时与当前缩放换算逻辑坐标选屏，系统发起的移动会保存、漫游移动不会；`Drop` 及退出路径 flush 最后 350 ms 的待写位置。更新检查只在成功响应（含已是最新）后写 24 小时节流，失败在下次启动仍会重试，并清理从未被读取的旧版本缓存。新增 `mixed_scale_and_changed_scale_select_logical_monitor`、`wander_moves_are_ignored_but_system_moves_recorded`、`drop_flushes_last_pending_move`、`successful_check_throttles_but_failure_retries`；位置模块 5 项通过。
+- 实际验证：`cargo fmt --all --check` 通过；`cargo check --workspace --locked` 通过；`cargo test --workspace --locked` 通过（客户端 **59 通过/1 忽略**，中继 **27**、协议 **9**）；`cargo check -p pet-client --target x86_64-pc-windows-gnu --locked` 通过；`sh deploy/tests/relay-smoke.sh` 通过（Docker 为 stub，不是容器验收）；`sh packaging/windows/build-installer.sh public` 通过（MakeNSIS 3.12）；`python3 packaging/windows/check-installer.py` 通过（公/私安装器载荷与凭据隔离）。`block v0.1.6` 的 future-incompat 警告仍在。
+- **未验收**：Windows 原地升级五项、macOS 已安装应用自更新四条、Windows/macOS 双开互斥、真实 GitHub API 抓包、混合 DPI 与双屏拔插、SIGKILL 后立即重新加锁。上述单测和编译不等于真机通过；GitHub v0.3.4 发布附件未改。
 
 ## 2026-10-15 当前接手要点
 
