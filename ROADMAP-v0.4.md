@@ -288,6 +288,9 @@
 
 | 编号 | 事项 | 状态 | 证据位置 |
 | --- | --- | --- | --- |
+| A1 | 证书现状文档纠偏 | 已验收 | `ba47b3b` + offread 日期检索说明 |
+| A2 | 镜像 CI tag 与产物验收 | 已验收 | [run 38732339784](https://github.com/CH1NAKGB/OnlineDesktopPet/actions/runs/38732339784)，产物 `relay-linux-x64-v0.3.4` |
+| A3 | RSA 错误气泡只提示一次 | 未验收 | `ba47b3b` + 回归通过；真实窗口复现待做 |
 | P0-1 | 验收并提交未提交修复 | 已验收 | `b74b1c7` + offread 回归摘要 |
 | P0-2 | 备份与恢复演练 | 进行中 | [BACKUP-RUNBOOK](deploy/standalone/BACKUP-RUNBOOK.md) + offread；离线密文恢复未完成 |
 | P0-3 | 监控与告警 | 未开始 | workflow + 告警记录 |
